@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/codex-configurator.md", "reason": "Verify endpoint, secret, migration, rollback, and no-session-write guarantees remain intact"}
+{"file": ".trellis/tasks/08-18-codex-path-discovery/research/local-discovery-evidence.md", "reason": "Check process filtering and candidate priority against observed desktop and CLI behavior"}

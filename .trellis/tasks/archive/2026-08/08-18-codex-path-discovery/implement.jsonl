@@ -1,0 +1,2 @@
+{"file": ".trellis/spec/backend/codex-configurator.md", "reason": "Preserve the existing CLI, security, configuration, and session-migration contracts while extending discovery"}
+{"file": ".trellis/tasks/08-18-codex-path-discovery/research/local-discovery-evidence.md", "reason": "Implement against verified Windows CLI, AppX backend, access-control, process, and CODEX_HOME behavior"}
