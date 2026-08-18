@@ -49,3 +49,24 @@ Implemented cross-platform Codex discovery, safe detect-only mode, verified GitH
 ### Status
 
 [OK] **Completed**
+
+
+## Session 3: 发布 Xi-AI Codex 配置器 v0.3.0
+
+**Date**: 2026-08-19
+**Task**: 发布 Xi-AI Codex 配置器 v0.3.0
+**Branch**: `master`
+
+### Summary
+
+实现选择 Y 后自动关闭已验证的 Codex 桌面实例，15 秒后精确强制终止并在重新探测通过后迁移本地对话可见性；新增安全的一行式 GitHub Release 安装命令、下载重试、中文提示与完整回归测试。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `7d0a132` | (see git log) |
+
+### Status
+
+[OK] **Completed**
