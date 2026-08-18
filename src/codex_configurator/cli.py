@@ -7,7 +7,12 @@ from urllib.request import urlopen
 
 from .catalog import catalog_bytes, load_bundled_catalog, merge_catalog
 from .credentials import prompt_token, read_masked_secret
-from .discovery import DiscoveryResult, discover
+from .desktop_control import close_codex_desktop
+from .discovery import (
+    DiscoveryResult,
+    discover,
+    discover_running_codex_processes,
+)
 from .endpoints import PROVIDER_ID
 from .errors import ConfiguratorError
 from .remote_models import fetch_remote_model_ids
@@ -40,7 +45,12 @@ def _print_preflight(result: DiscoveryResult, output=print) -> None:
             f"  桌面后端: {process.executable} "
             f"（来源={process.source}, PID={process.pid}, 状态=运行中）"
         )
-        output("  警告: 如需选择 Y 迁移对话，请先完全退出 Codex；选择 N 可继续配置")
+        if process.root_pid is not None and process.root_pid != process.pid:
+            output(
+                f"  桌面窗口: {process.root_executable or '路径未知'} "
+                f"（根 PID={process.root_pid}）"
+            )
+        output("  提示: 选择 Y 后脚本将自动关闭此 Codex 实例；选择 N 不会关闭")
     markers = ", ".join(result.home_markers) or "无"
     output(
         f"  CODEX_HOME: {result.codex_home} "
@@ -73,7 +83,7 @@ def _choose_model(model_ids: list[str], *, input_fn=input, output=print) -> str:
 
 def _choose_session_migration(*, input_fn=input) -> bool:
     value = input_fn(
-        "是否让现有本地对话在 xi_ai 下可见？选择 Y 前必须完全退出 Codex [y/N]："
+        "是否让现有本地对话在 xi_ai 下可见？选择 Y 将自动关闭 Codex [y/N]："
     ).strip().lower()
     return value in {"y", "yes"}
 
@@ -94,8 +104,17 @@ def _setup(
     secret_fn=read_masked_secret,
     opener=urlopen,
     output=print,
+    desktop_closer=None,
+    process_detector=None,
 ) -> int:
-    result = discover(codex_home=args.codex_home, codex_bin=args.codex_bin)
+    discovery_options = {}
+    if process_detector is not None:
+        discovery_options["process_detector"] = process_detector
+    result = discover(
+        codex_home=args.codex_home,
+        codex_bin=args.codex_bin,
+        **discovery_options,
+    )
     _print_preflight(result, output)
     if args.detect_only:
         output("探测完成：未请求 API Key，也未写入任何文件。")
@@ -107,13 +126,48 @@ def _setup(
     selected_model = _choose_model(remote_ids, input_fn=input_fn, output=output)
     migrate_sessions = _choose_session_migration(input_fn=input_fn)
 
-    if migrate_sessions and result.desktop_process is not None:
-        raise ConfiguratorError(
-            "检测到 Codex 桌面端仍在运行"
-            f"（PID {result.desktop_process.pid}）。选择 Y 会修改本地会话数据库，"
-            "为防止数据损坏，脚本已在写入前停止。请完全退出 Codex 后重试，"
-            "或重新运行并选择 N。"
-        )
+    desktop_was_closed = False
+    if migrate_sessions:
+        if result.executable is None or result.version is None:
+            raise ConfiguratorError("迁移对话需要检测到可运行的 Codex 及其版本")
+        if result.desktop_process is not None:
+            process = result.desktop_process
+            if args.dry_run:
+                output(
+                    "试运行提示：正式执行时将自动关闭 Codex "
+                    f"（后端 PID {process.pid}），正常退出超时后会精确强制终止。"
+                )
+            else:
+                output(
+                    "正在关闭 Codex 桌面端"
+                    f"（后端 PID {process.pid}），请勿重新打开客户端..."
+                )
+                closer = desktop_closer or close_codex_desktop
+                close_result = closer(process)
+                if close_result.forced:
+                    output(
+                        "Codex 未在 15 秒内正常退出，已完成精确强制终止"
+                        f"（根 PID {close_result.root_pid}）。"
+                    )
+                else:
+                    output(
+                        "Codex 已正常退出"
+                        f"（根 PID {close_result.root_pid}）。"
+                    )
+                detect_processes = (
+                    process_detector or discover_running_codex_processes
+                )
+                remaining, warnings = detect_processes()
+                if warnings:
+                    raise ConfiguratorError(
+                        "Codex 关闭后无法重新检查桌面进程，已停止配置"
+                    )
+                if remaining:
+                    raise ConfiguratorError(
+                        "Codex 桌面后端已重新出现"
+                        f"（PID {remaining[0].pid}），已在写入前停止配置"
+                    )
+                desktop_was_closed = True
 
     config_path = result.codex_home / "config.toml"
     catalog_path = result.codex_home / "xi-ai-model-catalog.json"
@@ -130,10 +184,6 @@ def _setup(
 
     rollout_changes = ()
     if migrate_sessions:
-        if result.executable is None or result.version is None:
-            raise ConfiguratorError(
-                "迁移对话需要检测到可运行的 Codex 及其版本"
-            )
         database = sqlite_path(result.codex_home)
         columns = sqlite_columns(database)
         if database.is_file() and "model_provider" not in columns:
@@ -161,7 +211,9 @@ def _setup(
     validated = validate_installed(result.codex_home)
     output(f"Xi-AI 配置完成，默认模型：{validated['model']}")
     output(f"备份已创建：{backup_dir}")
-    if result.desktop_process is not None:
+    if desktop_was_closed:
+        output("Codex 已由脚本关闭；请重新启动 Codex 以加载新配置。")
+    elif result.desktop_process is not None:
         output("请完全退出并重新启动 Codex，以加载新的供应商配置。")
     else:
         output("请重新启动 Codex，以加载新的供应商配置。")
@@ -193,7 +245,11 @@ def _validate(args, *, output=print) -> int:
 
 def _restore(args, *, output=print) -> int:
     result = discover(codex_home=args.codex_home, codex_bin=args.codex_bin)
-    backup = Path(args.backup).expanduser().resolve() if args.backup else latest_backup(result.codex_home)
+    backup = (
+        Path(args.backup).expanduser().resolve()
+        if args.backup
+        else latest_backup(result.codex_home)
+    )
     restore_backup(result.codex_home, backup)
     output(f"已恢复 Xi-AI 备份：{backup}")
     output("请重启 Codex 后再继续使用。")
@@ -228,6 +284,8 @@ def main(
     secret_fn=read_masked_secret,
     opener=urlopen,
     output=print,
+    desktop_closer=None,
+    process_detector=None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -239,6 +297,8 @@ def main(
                 secret_fn=secret_fn,
                 opener=opener,
                 output=output,
+                desktop_closer=desktop_closer,
+                process_detector=process_detector,
             )
         if args.command == "status":
             return _status(args, output=output)

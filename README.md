@@ -14,7 +14,7 @@ provider.
 - Python 3.11 or newer
 - An installed Codex client
 - A Xi-AI API token
-- Close running Codex clients before choosing conversation migration
+- Run conversation migration from a system terminal, not from inside Codex
 
 ## Run
 
@@ -60,11 +60,30 @@ Download and verify the standalone bootstrap first. It downloads and verifies
 the complete bundle into a versioned local cache. Without `--configure`, it
 always runs `--detect-only`; entering a Key requires an explicit second step.
 
+### One-line setup
+
+Windows PowerShell (paste once, then press Enter):
+
+```powershell
+$r='xiziqiwuyou/xi-ai-codex-configurator';$d=Join-Path $env:TEMP 'xi-ai-codex-bootstrap';New-Item -ItemType Directory -Force $d|Out-Null;$u="https://github.com/$r/releases/latest/download";$p=Join-Path $d 'xi-ai-codex-bootstrap.py';$s="$p.sha256";curl.exe --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py" --output $p;if($LASTEXITCODE -ne 0){throw '下载 bootstrap 失败'};curl.exe --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py.sha256" --output $s;if($LASTEXITCODE -ne 0){throw '下载校验文件失败'};$e=((Get-Content $s -Raw).Trim() -split '\s+')[0].ToLowerInvariant();$a=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant();if($e -ne $a){throw 'Bootstrap SHA-256 校验失败'};if(Get-Command py -ErrorAction SilentlyContinue){py -3 $p --repo $r --version latest --configure}else{python $p --repo $r --version latest --configure}
+```
+
+macOS/Linux (paste once, then press Enter):
+
+```sh
+sh -c 'set -eu; r=xiziqiwuyou/xi-ai-codex-configurator; d="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"; mkdir -p "$d"; u="https://github.com/$r/releases/latest/download"; p="$d/xi-ai-codex-bootstrap.py"; curl --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py" -o "$p"; curl --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py.sha256" -o "$p.sha256"; cd "$d"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c xi-ai-codex-bootstrap.py.sha256; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c xi-ai-codex-bootstrap.py.sha256; else echo "No SHA-256 tool found" >&2; exit 1; fi; python3 "$p" --repo "$r" --version latest --configure'
+```
+
+Both commands save the bootstrap locally and verify SHA-256 before Python runs
+it. They do not pipe downloaded script text directly into a shell.
+
+### Manual pinned-version setup
+
 Windows PowerShell:
 
 ```powershell
 $repo = "OWNER/REPO"
-$tag = "v0.2.2"
+$tag = "v0.3.0"
 $dir = Join-Path $env:TEMP "xi-ai-codex-bootstrap"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -OutFile (Join-Path $dir "xi-ai-codex-bootstrap.py")
@@ -80,7 +99,7 @@ macOS/Linux:
 
 ```sh
 repo="OWNER/REPO"
-tag="v0.2.2"
+tag="v0.3.0"
 dir="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"
 mkdir -p "$dir"
 curl --fail --location "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -o "$dir/xi-ai-codex-bootstrap.py"
@@ -97,8 +116,8 @@ conversation metadata are merged on the target computer.
 Pushing a version tag triggers the release workflow. For example:
 
 ```sh
-git tag v0.2.2
-git push origin v0.2.2
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The workflow runs the full test suite, packages the five assets above, and
@@ -113,7 +132,10 @@ The setup flow is interactive:
 3. The tool fetches the Xi-AI model list.
 4. Select a default model from the numbered menu.
 5. Choose whether existing conversations should be visible under `xi_ai`.
-6. The tool creates a complete backup and applies the validated configuration.
+6. If `Y` is selected, the tool closes the exact detected Codex desktop
+   instance. It requests a normal exit for 15 seconds, then revalidates and
+   force-stops only that instance if necessary.
+7. The tool creates a complete backup and applies the validated configuration.
 
 ## Path Discovery
 
@@ -135,10 +157,11 @@ Microsoft Store/AppX, or application-bundle installation directory merely
 because a Codex executable was found there.
 
 Opening Codex before setup is optional. When running, its `app-server` process
-can help identify the desktop installation. Some Store executables can be
-observed but cannot be launched directly because of operating-system access
-controls; they remain desktop evidence and are not treated as the runnable
-CLI.
+can help identify the desktop installation and gives the setup flow an exact
+process target if conversation migration is selected. Some Store executables
+can be observed but cannot be launched directly because of operating-system
+access controls; they remain desktop evidence and are not treated as the
+runnable CLI or configuration home.
 
 ## Endpoint Mapping
 
@@ -163,10 +186,16 @@ source files, and timestamps remain local and are not sent anywhere.
 
 Answering `N` leaves all session files and the session database untouched.
 
-If a Codex desktop backend is running, answering `Y` exits before any target
-file is written. Close Codex and run the script again from an external terminal
-to perform the local visibility migration. The transaction layer also checks
-SQLite WAL/SHM and locking state before mutation.
+If a Codex desktop backend is running, answering `Y` authorizes the script to
+close that exact verified desktop instance. It first requests an orderly exit
+and waits 15 seconds. If the backend remains, the script revalidates its PID,
+executable, command line, and process ancestry before force-stopping the exact
+GUI root and backend PIDs. It never stops processes by name.
+
+Run setup from a system PowerShell/Terminal. If setup is running inside the
+detected Codex process tree, it aborts before signaling or writing so it cannot
+terminate itself halfway through migration. After shutdown, the script checks
+for a respawned backend plus SQLite WAL/SHM and locking state before mutation.
 
 ## Commands
 

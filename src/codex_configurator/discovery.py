@@ -25,6 +25,9 @@ class DesktopProcess:
     executable: Path
     command_line: str
     source: str
+    parent_pid: int | None = None
+    root_pid: int | None = None
+    root_executable: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -33,6 +36,7 @@ class ProcessRecord:
     name: str
     executable: Path | None
     command_line: str
+    parent_pid: int | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +286,7 @@ def detect_codex_version(
 def classify_desktop_processes(
     records: Sequence[ProcessRecord], *, source: str
 ) -> tuple[DesktopProcess, ...]:
+    by_pid = {record.pid: record for record in records}
     matches: list[DesktopProcess] = []
     for record in records:
         if record.executable is None:
@@ -295,15 +300,63 @@ def classify_desktop_processes(
             continue
         if not APP_SERVER_RE.search(record.command_line):
             continue
+        root = _desktop_root_record(record, by_pid)
         matches.append(
             DesktopProcess(
                 pid=record.pid,
                 executable=_resolved_path(record.executable),
                 command_line=record.command_line,
                 source=source,
+                parent_pid=record.parent_pid,
+                root_pid=root.pid,
+                root_executable=(
+                    _resolved_path(root.executable)
+                    if root.executable is not None
+                    else None
+                ),
             )
         )
     return tuple(sorted(matches, key=lambda item: item.pid))
+
+
+def _application_install_root(executable: Path) -> Path:
+    path = _resolved_path(executable)
+    for index, part in enumerate(path.parts):
+        if part.lower().endswith(".app"):
+            return Path(*path.parts[: index + 1])
+    if path.parent.name.lower() == "resources":
+        return path.parent.parent
+    return path.parent
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        return os.path.commonpath([_path_key(path), _path_key(root)]) == _path_key(root)
+    except ValueError:
+        return False
+
+
+def _desktop_root_record(
+    backend: ProcessRecord, by_pid: Mapping[int, ProcessRecord]
+) -> ProcessRecord:
+    if backend.executable is None:
+        return backend
+    install_root = _application_install_root(backend.executable)
+    root = backend
+    parent_pid = backend.parent_pid
+    visited = {backend.pid}
+    while parent_pid is not None and parent_pid not in visited:
+        visited.add(parent_pid)
+        parent = by_pid.get(parent_pid)
+        if (
+            parent is None
+            or parent.executable is None
+            or not _path_is_within(parent.executable, install_root)
+        ):
+            break
+        root = parent
+        parent_pid = parent.parent_pid
+    return root
 
 
 def _powershell_executable() -> str | None:
@@ -316,8 +369,7 @@ def _windows_process_records(*, runner=subprocess.run) -> list[ProcessRecord]:
         raise OSError("PowerShell 不可用")
     script = (
         "$items = @(Get-CimInstance Win32_Process | "
-        "Where-Object { $_.Name -ieq 'codex.exe' } | "
-        "Select-Object ProcessId,Name,ExecutablePath,CommandLine); "
+        "Select-Object ProcessId,ParentProcessId,Name,ExecutablePath,CommandLine); "
         "$items | ConvertTo-Json -Compress"
     )
     result = runner(
@@ -338,15 +390,21 @@ def _windows_process_records(*, runner=subprocess.run) -> list[ProcessRecord]:
         if not isinstance(item, dict):
             continue
         pid = item.get("ProcessId")
+        parent_pid = item.get("ParentProcessId")
         executable = item.get("ExecutablePath")
-        if not isinstance(pid, int) or not isinstance(executable, str) or not executable:
+        if not isinstance(pid, int):
             continue
         records.append(
             ProcessRecord(
                 pid=pid,
                 name=str(item.get("Name") or ""),
-                executable=Path(executable),
+                executable=(
+                    Path(executable)
+                    if isinstance(executable, str) and executable
+                    else None
+                ),
                 command_line=str(item.get("CommandLine") or ""),
+                parent_pid=parent_pid if isinstance(parent_pid, int) else None,
             )
         )
     return records
@@ -357,7 +415,7 @@ def _posix_process_records(
 ) -> list[ProcessRecord]:
     current_platform = platform or sys.platform
     result = runner(
-        ["ps", "-axo", "pid=,comm=,args="],
+        ["ps", "-axo", "pid=,ppid=,comm=,args="],
         check=True,
         capture_output=True,
         text=True,
@@ -367,18 +425,19 @@ def _posix_process_records(
     )
     records: list[ProcessRecord] = []
     for line in result.stdout.splitlines():
-        fields = line.strip().split(None, 2)
-        if len(fields) < 3:
+        fields = line.strip().split(None, 3)
+        if len(fields) < 4:
             continue
-        raw_pid, command, arguments = fields
+        raw_pid, raw_parent_pid, command, arguments = fields
         try:
             pid = int(raw_pid)
+            parent_pid = int(raw_parent_pid)
         except ValueError:
             continue
         executable = Path(command)
         first_argument = arguments.split(None, 1)[0].strip('"\'')
         possible = Path(first_argument)
-        if possible.name.lower() in CODEX_PROCESS_NAMES and possible.is_absolute():
+        if possible.is_absolute() or first_argument.startswith("/"):
             executable = possible
         if current_platform.startswith("linux"):
             try:
@@ -395,9 +454,19 @@ def _posix_process_records(
                 name=Path(command).name,
                 executable=executable,
                 command_line=arguments,
+                parent_pid=parent_pid,
             )
         )
     return records
+
+
+def inspect_process_records(
+    *, platform: str | None = None, runner=subprocess.run
+) -> tuple[ProcessRecord, ...]:
+    current_platform = platform or sys.platform
+    if current_platform.startswith("win"):
+        return tuple(_windows_process_records(runner=runner))
+    return tuple(_posix_process_records(platform=current_platform, runner=runner))
 
 
 def discover_running_codex_processes(
@@ -405,12 +474,10 @@ def discover_running_codex_processes(
 ) -> tuple[tuple[DesktopProcess, ...], tuple[str, ...]]:
     current_platform = platform or sys.platform
     try:
-        if current_platform.startswith("win"):
-            records = _windows_process_records(runner=runner)
-            source = "windows-process"
-        else:
-            records = _posix_process_records(platform=current_platform, runner=runner)
-            source = "posix-process"
+        records = inspect_process_records(platform=current_platform, runner=runner)
+        source = (
+            "windows-process" if current_platform.startswith("win") else "posix-process"
+        )
         return classify_desktop_processes(records, source=source), ()
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError):
         return (), ("无法检查正在运行的 Codex 桌面进程",)

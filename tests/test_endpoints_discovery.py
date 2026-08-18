@@ -89,6 +89,53 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(len(processes), 1)
         self.assertEqual(processes[0].pid, 3)
 
+    def test_desktop_root_is_derived_from_same_install_tree(self):
+        app = Path("C:/Program Files/WindowsApps/OpenAI.Codex/app")
+        records = [
+            ProcessRecord(
+                10,
+                "explorer.exe",
+                Path("C:/Windows/explorer.exe"),
+                "explorer.exe",
+                parent_pid=1,
+            ),
+            ProcessRecord(
+                20,
+                "ChatGPT.exe",
+                app / "ChatGPT.exe",
+                '"ChatGPT.exe" --remote-debugging-port=1234',
+                parent_pid=10,
+            ),
+            ProcessRecord(
+                21,
+                "ChatGPT.exe",
+                app / "ChatGPT.exe",
+                '"ChatGPT.exe" --type=renderer',
+                parent_pid=20,
+            ),
+            ProcessRecord(
+                30,
+                "codex.exe",
+                app / "resources/codex.exe",
+                '"codex.exe" app-server',
+                parent_pid=20,
+            ),
+            ProcessRecord(
+                40,
+                "ChatGPT.exe",
+                Path("D:/Other/ChatGPT.exe"),
+                '"ChatGPT.exe"',
+                parent_pid=10,
+            ),
+        ]
+
+        process = classify_desktop_processes(records, source="test-process")[0]
+
+        self.assertEqual(process.pid, 30)
+        self.assertEqual(process.parent_pid, 20)
+        self.assertEqual(process.root_pid, 20)
+        self.assertEqual(process.root_executable, (app / "ChatGPT.exe").resolve())
+
     def test_runnable_path_cli_wins_without_losing_desktop_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
@@ -233,7 +280,12 @@ class DiscoveryTests(unittest.TestCase):
 
     def test_posix_process_path_comes_from_command_arguments(self):
         fake_ps = SimpleNamespace(
-            stdout=" 12 /usr/local/bin/codex /usr/local/bin/codex app-server --listen\n",
+            stdout=(
+                " 1 0 launchd /sbin/launchd\n"
+                " 9 1 Codex /Applications/Codex.app/Contents/MacOS/Codex\n"
+                " 12 9 codex /Applications/Codex.app/Contents/Resources/codex "
+                "app-server --listen\n"
+            ),
             stderr="",
         )
 
@@ -246,8 +298,10 @@ class DiscoveryTests(unittest.TestCase):
         self.assertEqual(warnings, ())
         self.assertEqual(len(processes), 1)
         self.assertEqual(
-            processes[0].executable, Path("/usr/local/bin/codex").resolve()
+            processes[0].executable,
+            Path("/Applications/Codex.app/Contents/Resources/codex").resolve(),
         )
+        self.assertEqual(processes[0].root_pid, 9)
 
 
 if __name__ == "__main__":

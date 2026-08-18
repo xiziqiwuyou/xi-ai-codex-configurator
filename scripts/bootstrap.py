@@ -12,6 +12,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import zipfile
 from pathlib import Path, PurePosixPath
 from urllib.error import HTTPError, URLError
@@ -25,6 +26,7 @@ MAX_API_BYTES = 5 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 MAX_EXTRACT_BYTES = 300 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 10_000
+DOWNLOAD_ATTEMPTS = 3
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -79,15 +81,20 @@ def _read_limited(response, limit: int) -> bytes:
 
 
 def _open_bytes(url: str, *, opener=urlopen, limit: int) -> bytes:
-    try:
-        with opener(_request(url), timeout=30) as response:
-            return _read_limited(response, limit)
-    except BootstrapError:
-        raise
-    except HTTPError as exc:
-        raise BootstrapError(f"GitHub 请求失败，HTTP {exc.code}") from exc
-    except (URLError, OSError) as exc:
-        raise BootstrapError("无法连接 GitHub Releases") from exc
+    last_error: URLError | OSError | None = None
+    for attempt in range(DOWNLOAD_ATTEMPTS):
+        try:
+            with opener(_request(url), timeout=30) as response:
+                return _read_limited(response, limit)
+        except BootstrapError:
+            raise
+        except HTTPError as exc:
+            raise BootstrapError(f"GitHub 请求失败，HTTP {exc.code}") from exc
+        except (URLError, OSError) as exc:
+            last_error = exc
+            if attempt + 1 < DOWNLOAD_ATTEMPTS:
+                time.sleep(0.5 * (2**attempt))
+    raise BootstrapError("多次重试后仍无法连接 GitHub Releases") from last_error
 
 
 def _validate_repository(repository: str) -> str:

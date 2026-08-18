@@ -10,6 +10,7 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
+from urllib.error import URLError
 
 from scripts import bootstrap, package_release
 
@@ -51,6 +52,24 @@ class BootstrapTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, 1)
+
+    def test_transient_github_failures_are_retried(self):
+        attempts = []
+
+        def opener(request, timeout):
+            attempts.append(request.full_url)
+            if len(attempts) < 3:
+                raise URLError("temporary reset")
+            return FakeResponse(b"ok")
+
+        with patch.object(bootstrap.time, "sleep") as sleeper:
+            payload = bootstrap._open_bytes(
+                "https://api.github.com/example", opener=opener, limit=1024
+            )
+
+        self.assertEqual(payload, b"ok")
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual([call.args[0] for call in sleeper.call_args_list], [0.5, 1.0])
 
     def test_verified_release_defaults_to_detect_only(self):
         bundle = release_bundle()
@@ -268,6 +287,16 @@ class PackageReleaseTests(unittest.TestCase):
             self.assertEqual(
                 manifest["bootstrap"]["name"], package_release.BOOTSTRAP_NAME
             )
+
+    def test_readme_one_line_commands_keep_checksum_verification(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text(encoding="utf-8")
+
+        self.assertIn("--version latest --configure", readme)
+        self.assertIn("xi-ai-codex-bootstrap.py.sha256", readme)
+        self.assertIn("curl.exe", readme)
+        self.assertNotIn("| iex", readme.lower())
+        self.assertNotIn("curl | sh", readme.lower())
 
 
 if __name__ == "__main__":

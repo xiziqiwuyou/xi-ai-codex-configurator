@@ -6,6 +6,10 @@ class DiscoveryError(ConfiguratorError):
     pass
 
 
+class DesktopControlError(ConfiguratorError):
+    pass
+
+
 class CredentialError(ConfiguratorError):
     pass
 

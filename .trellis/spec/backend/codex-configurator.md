@@ -8,9 +8,9 @@ JSON catalog, rollout JSONL, and SQLite state.
 
 - Trigger: the project configures Codex to use the fixed Xi-AI Responses API.
 - In scope: local Codex discovery, one-time masked token input, Simplified
-  Chinese console messages, model catalog
+  Chinese console messages, exact desktop-process shutdown, model catalog
   merge, managed TOML updates, optional local conversation visibility repair,
-  backup, rollback, and restore.
+  verified one-line release setup, backup, rollback, and restore.
 - Out of scope: uploading or replaying historical prompts, responses,
   attachments, project paths, or source files to Xi-AI.
 
@@ -26,6 +26,8 @@ def main(
     secret_fn: Callable[[str], str] = getpass.getpass,
     opener: Callable = urlopen,
     output: Callable[[str], None] = print,
+    desktop_closer: Callable | None = None,
+    process_detector: Callable | None = None,
 ) -> int
 ```
 
@@ -38,12 +40,16 @@ Discovery signatures are:
 ```python
 def discover(...) -> DiscoveryResult
 def resolve_codex_home_details(...) -> tuple[Path, str, tuple[str, ...], str]
+def inspect_process_records(...) -> tuple[ProcessRecord, ...]
 def discover_running_codex_processes(...) -> tuple[tuple[DesktopProcess, ...], tuple[str, ...]]
+def close_codex_desktop(process: DesktopProcess, ...) -> DesktopCloseResult
 ```
 
 `DiscoveryResult.executable` is a runnable CLI candidate. A desktop
-`app-server` process is reported separately as `desktop_process`; it is never
-implicitly treated as a configuration directory.
+`app-server` process is reported separately as `desktop_process`, including
+its parent PID and exact GUI root PID/executable when those can be proven from
+the same application install tree. It is never implicitly treated as a
+configuration directory.
 
 Core storage signatures are:
 
@@ -100,7 +106,31 @@ manager/user-local locations, registered desktop installation, then a running
 `codex ... app-server` path only after version validation. Home marker evidence
 (`config.toml`, `state_5.sqlite`, `sessions/`, `archived_sessions/`) is shown
 with a confidence label. An inaccessible Store/AppX executable is diagnostics,
-not a runnable CLI.
+not a runnable CLI. Windows records include PPID and the `ChatGPT.exe` parent
+used by the Store Codex package; POSIX records include PPID from `ps`.
+
+### Desktop shutdown
+
+Automatic shutdown is scoped to normal `setup` after the user selects `Y`.
+`N`, `--detect-only`, and `--dry-run` never signal a process. The shutdown
+target is derived from the detected `app-server` PID and parent chain, and
+must stay inside the same application install root. Process names are never a
+termination selector.
+
+Before signaling, the controller revalidates backend PID, executable, command
+line, root PID/executable, and caller ancestry. If setup is a descendant of the
+target backend, it aborts and requires a system PowerShell/Terminal. Windows
+uses `CloseMainWindow`; POSIX uses `SIGTERM`. After 15 seconds the controller
+revalidates identity, then force-stops only the exact root/backend PIDs using
+`Stop-Process -Id ... -Force` or `SIGKILL`. It waits up to 10 more seconds.
+
+After shutdown, setup runs fresh desktop discovery. Inspection failure,
+identity drift, permission failure, a remaining/respawned backend, or a force
+timeout aborts before any target file write. SQLite readiness checks remain a
+second gate before backup and mutation. Snapshot and parser failures are
+normalized to `DesktopControlError`. On POSIX, `ProcessLookupError` after the
+verified root is killed is benign only when the final snapshot confirms that
+the backend has exited.
 
 ### GitHub release assets
 
@@ -110,14 +140,15 @@ Public releases use exact asset names `xi-ai-codex-bundle.zip`,
 standalone bootstrap downloads the GitHub release metadata plus the bundle and
 its checksum, verifies that the checksum names the expected bundle, rejects
 unsafe or colliding ZIP entries, extracts to a versioned cache, and runs the
-local bundle.
+local bundle. Transient URL/OS connection failures are retried three times with
+bounded exponential backoff; HTTP and validation errors fail immediately.
 
 The release manifest schema is:
 
 ```json
 {
   "schema_version": 1,
-  "version": "v0.2.2",
+  "version": "v0.3.0",
   "bundle": {
     "name": "xi-ai-codex-bundle.zip",
     "sha256": "<64 lowercase hex characters>",
@@ -135,6 +166,11 @@ The repository must be supplied as `--repo OWNER/REPO` or
 `GITHUB_REPOSITORY`; the tool must not guess an owner or repository. A release
 tag must be supplied with `--version TAG` or `XI_AI_CODEX_VERSION`; `latest`
 is allowed only when explicitly requested.
+
+README one-line commands hard-code the public repository and explicit
+`latest`, download both bootstrap and checksum to a local temporary directory,
+verify SHA-256, then run the local bootstrap with `--configure`. They must not
+pipe downloaded script text into PowerShell or a POSIX shell.
 
 ### Model response and catalog
 
@@ -155,6 +191,10 @@ When the user answers `Y`, only these local fields may change:
 Existing non-empty `thread_source`, event payloads, IDs, titles, cwd/project
 paths, attachments, messages, and file timestamps remain unchanged. `N` must
 not open the session database or rewrite rollout files.
+
+When `Y` is selected with an active desktop, successful shutdown and fresh
+no-backend discovery are required in the same setup run before session
+inspection and migration continue.
 
 ### Backup and restore
 
@@ -180,7 +220,11 @@ token. SQLite backups use `VACUUM INTO` before mutation.
 | Restore manifest has invalid paths, hashes, schema, or duplicate targets | reject before writing |
 | Configured model is absent from the active catalog | `validate` fails |
 | `setup --detect-only` is selected | no prompt, network call, or target write |
-| Desktop `app-server` is active and user selects `Y` | exit before mutation; ask user to close Codex |
+| Desktop `app-server` is active and user selects `Y` | close exact verified instance, rediscover, then migrate in the same run |
+| Setup process is a descendant of the target Codex backend | reject before signaling or writing; require an external system terminal |
+| Graceful close exceeds 15 seconds | revalidate identity, force exact root/backend PIDs, and wait up to 10 seconds |
+| PID/path/command/root identity changes before force | reject before force or target-file writes |
+| Desktop inspection fails or a backend remains/respawns after close | reject before target-file writes |
 | Release bundle is missing or checksum mismatches | reject before extraction or local execution |
 | Bootstrap has no `--repo` and no `GITHUB_REPOSITORY` | reject before GitHub request |
 | Bootstrap has no `--version` or `XI_AI_CODEX_VERSION` | reject before GitHub request |
@@ -206,6 +250,12 @@ raw response bodies.
   before any target replacement.
 - Good: the npm CLI is runnable while the Store `app-server` is active; report
   both paths and use the npm CLI for version/model commands.
+- Good: the Store `app-server` has a same-install-tree `ChatGPT.exe` parent;
+  close that exact root, not every `ChatGPT.exe` process.
+- Bad: setup runs inside the target backend and attempts to close its own
+  ancestor; reject before sending a close request.
+- Bad: a force branch uses `Stop-Process -Name` or sends a signal without a
+  fresh identity check.
 - Bad: deriving `CODEX_HOME` from `C:\\Program Files\\WindowsApps\\...`; the
   application install directory must never become the config target.
 
@@ -216,7 +266,11 @@ raw response bodies.
 - Credential tests assert one Enter gate, one masked prompt, and empty-token
   abort behavior.
 - CLI tests assert Chinese preflight, model-selection, dry-run, success, and
-  active-desktop migration guidance without exposing the token.
+  active-desktop close/migration guidance without exposing the token.
+- Desktop-control tests assert same-install-tree root derivation, exact-PID
+  graceful/force actions, self-descendant rejection, identity drift refusal,
+  orphaned-backend handling, snapshot-error normalization, child-exit races,
+  and bounded timeout failure.
 - Remote-model tests assert bearer header construction, deduplication,
   malformed-shape rejection, and secret-free errors.
 - Catalog/TOML tests assert bundled retention, remote append, provider-table
@@ -232,11 +286,13 @@ raw response bodies.
 - Launcher checks include PowerShell parsing and POSIX `sh -n` when a POSIX
   shell is available.
 - Discovery tests assert CLI/process separation, candidate fall-through,
-  AppX JSON parsing, marker confidence, process filtering, and the no-write
-  `--detect-only` mode.
+  AppX JSON parsing, PPID/root derivation, marker confidence, process filtering,
+  and the no-write `--detect-only` mode.
 - Bootstrap tests assert GitHub metadata parsing, asset selection, checksum
-  failure, ZIP traversal/symlink rejection, cache extraction, and setup-argument
-  forwarding.
+  failure, transient connection retries, ZIP traversal/symlink rejection,
+  cache extraction, and setup-argument forwarding.
+- Documentation tests assert copy-ready one-line commands include checksum
+  verification, explicit `latest --configure`, and no remote pipe execution.
 
 ## 7. Wrong vs Correct
 
