@@ -28,14 +28,33 @@ def _fallback_catalog() -> Path:
 
 def _print_preflight(result: DiscoveryResult, output=print) -> None:
     output("Codex preflight")
-    output(f"  executable: {result.executable or 'not found'}")
-    output(f"  version: {result.version or 'unknown'}")
-    output(f"  CODEX_HOME: {result.codex_home}")
+    output(
+        f"  runnable CLI: {result.executable or 'not found'} "
+        f"(source={result.executable_source})"
+    )
+    output(f"  CLI version: {result.version or 'unknown'}")
+    if result.desktop_process is None:
+        output("  desktop backend: not detected")
+    else:
+        process = result.desktop_process
+        output(
+            f"  desktop backend: {process.executable} "
+            f"(source={process.source}, pid={process.pid}, active=yes)"
+        )
+        output("  warning: close Codex before choosing conversation migration (Y)")
+    markers = ", ".join(result.home_markers) or "none"
+    output(
+        f"  CODEX_HOME: {result.codex_home} "
+        f"(source={result.codex_home_source}, confidence={result.home_confidence}, "
+        f"markers={markers})"
+    )
     output(f"  config: {result.codex_home / 'config.toml'}")
     output(f"  model catalog: {result.codex_home / 'xi-ai-model-catalog.json'}")
     output(f"  sessions: {result.codex_home / 'sessions'}")
     output(f"  archived sessions: {result.codex_home / 'archived_sessions'}")
     output(f"  session database: {sqlite_path(result.codex_home)}")
+    for warning in result.warnings:
+        output(f"  warning: {warning}")
 
 
 def _choose_model(model_ids: list[str], *, input_fn=input, output=print) -> str:
@@ -79,12 +98,21 @@ def _setup(
 ) -> int:
     result = discover(codex_home=args.codex_home, codex_bin=args.codex_bin)
     _print_preflight(result, output)
+    if args.detect_only:
+        output("Detection complete; no token was requested and no files were written.")
+        return 0
     token = prompt_token(input_fn=input_fn, secret_fn=secret_fn)
     remote_ids = fetch_remote_model_ids(token, opener=opener)
     bundled = load_bundled_catalog(result.executable, fallback_path=_fallback_catalog())
     merged = merge_catalog(bundled, remote_ids)
     selected_model = _choose_model(remote_ids, input_fn=input_fn, output=output)
     migrate_sessions = _choose_session_migration(input_fn=input_fn)
+
+    if migrate_sessions and result.desktop_process is not None:
+        raise ConfiguratorError(
+            "Codex desktop is still running "
+            f"(PID {result.desktop_process.pid}); close Codex and rerun setup"
+        )
 
     config_path = result.codex_home / "config.toml"
     catalog_path = result.codex_home / "xi-ai-model-catalog.json"
@@ -132,8 +160,10 @@ def _setup(
     validated = validate_installed(result.codex_home)
     output(f"Configured Xi-AI model: {validated['model']}")
     output(f"Backup created: {backup_dir}")
-    if migrate_sessions:
-        output("Restart Codex to refresh local conversation visibility.")
+    if result.desktop_process is not None:
+        output("Close and restart Codex to load the new provider configuration.")
+    else:
+        output("Restart Codex to load the new provider configuration.")
     return 0
 
 
@@ -180,6 +210,11 @@ def build_parser() -> argparse.ArgumentParser:
         subparser.add_argument("--codex-bin", help="Override the Codex executable")
         if name == "setup":
             subparser.add_argument("--dry-run", action="store_true")
+            subparser.add_argument(
+                "--detect-only",
+                action="store_true",
+                help="Detect Codex paths and processes without prompting or writing",
+            )
         if name == "restore":
             subparser.add_argument("--backup", help="Restore a specific backup directory")
     return parser

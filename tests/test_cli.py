@@ -6,7 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_configurator.cli import main
-from codex_configurator.discovery import DiscoveryResult
+from codex_configurator.discovery import DesktopProcess, DiscoveryResult
 
 
 class FakeResponse:
@@ -65,6 +65,40 @@ class CliTests(unittest.TestCase):
             self.assertIn("selected model: remote-b", rendered)
             self.assertIn("migrate conversations: no", rendered)
             self.assertNotIn("super-secret", rendered)
+
+    def test_detect_only_does_not_prompt_call_api_or_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            output = []
+            discovery = DiscoveryResult(
+                home,
+                Path("C:/Tools/codex.exe"),
+                "0.144.1",
+                executable_source="path",
+                codex_home_source="explicit",
+                home_confidence="high",
+            )
+            with patch(
+                "codex_configurator.cli.discover", return_value=discovery
+            ):
+                result = main(
+                    ["setup", "--detect-only", "--codex-home", str(home)],
+                    input_fn=lambda prompt: (_ for _ in ()).throw(
+                        AssertionError("input must not be requested")
+                    ),
+                    secret_fn=lambda prompt: (_ for _ in ()).throw(
+                        AssertionError("token must not be requested")
+                    ),
+                    opener=lambda request, timeout: (_ for _ in ()).throw(
+                        AssertionError("network must not be used")
+                    ),
+                    output=output.append,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertFalse((home / "config.toml").exists())
+            self.assertFalse((home / "xi-ai-model-catalog.json").exists())
+            self.assertIn("no token was requested", "\n".join(output))
 
     def test_no_migration_keeps_sessions_and_database_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -129,6 +163,47 @@ class CliTests(unittest.TestCase):
             self.assertFalse((home / "config.toml").exists())
             self.assertFalse((home / "xi-ai-model-catalog.json").exists())
             self.assertNotIn("placeholder-key", "\n".join(output))
+
+    def test_migration_rejects_active_desktop_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "y"])
+            output = []
+            desktop = DesktopProcess(
+                pid=77,
+                executable=Path("C:/Apps/Codex/resources/codex.exe"),
+                command_line="codex.exe app-server",
+                source="test-process",
+            )
+            discovery = DiscoveryResult(
+                home,
+                Path("C:/Tools/codex.exe"),
+                "0.144.1",
+                executable_source="path",
+                desktop_process=desktop,
+            )
+            with patch(
+                "codex_configurator.cli.discover", return_value=discovery
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ):
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    opener=lambda request, timeout: FakeResponse(),
+                    output=output.append,
+                )
+
+            self.assertEqual(result, 1)
+            self.assertFalse((home / "config.toml").exists())
+            self.assertFalse((home / "xi-ai-model-catalog.json").exists())
+            rendered = "\n".join(output)
+            self.assertIn("PID 77", rendered)
+            self.assertIn("runnable CLI", rendered)
+            self.assertIn("desktop backend", rendered)
+            self.assertNotIn("placeholder-key", rendered)
 
 
 if __name__ == "__main__":
