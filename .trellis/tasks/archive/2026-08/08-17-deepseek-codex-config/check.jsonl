@@ -1,0 +1,2 @@
+{"file": ".trellis/tasks/08-17-deepseek-codex-config/research/endpoint-session-model-evidence.md", "reason": "Check implementation claims against verified endpoint, model, and session-state behavior"}
+{"file": ".trellis/spec/backend/quality-guidelines.md", "reason": "Apply project quality and verification requirements to the Python CLI"}
