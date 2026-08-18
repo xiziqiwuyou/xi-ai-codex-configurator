@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 3
+- **Total Sessions**: 4
 - **Last Active**: 2026-08-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~72 | Active |
+| `journal-1.md` | ~93 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 4 | 2026-08-19 | 发布 v0.3.1 修复 SQLite WAL 误判 | `84d37f1` | `master` |
 | 3 | 2026-08-19 | 发布 Xi-AI Codex 配置器 v0.3.0 | `7d0a132` | `master` |
 | 2 | 2026-08-18 | GitHub Release Codex bootstrap | `f3d31b3`, `73f410c` | `master` |
 | 1 | 2026-08-18 | Xi-AI Codex configurator | `2ba2a35`, `6ceadde` | `master` |

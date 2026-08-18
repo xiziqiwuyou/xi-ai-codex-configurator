@@ -70,3 +70,24 @@ Implemented cross-platform Codex discovery, safe detect-only mode, verified GitH
 ### Status
 
 [OK] **Completed**
+
+
+## Session 4: 发布 v0.3.1 修复 SQLite WAL 误判
+
+**Date**: 2026-08-19
+**Task**: 发布 v0.3.1 修复 SQLite WAL 误判
+**Branch**: `master`
+
+### Summary
+
+修复残留 SQLite WAL/SHM 被误判为占用的问题：仅在两次 Codex 进程复查通过后授权 SQLite RESTART checkpoint、完整性检查和写锁探测；保留默认 restore 安全策略，新增有效残留 WAL、活跃读事务、进程重现和端到端备份迁移测试。发布 v0.3.1 并完成远端 bootstrap 只读验证。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `84d37f1` | (see git log) |
+
+### Status
+
+[OK] **Completed**
