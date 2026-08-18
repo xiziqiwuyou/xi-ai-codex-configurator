@@ -27,3 +27,25 @@ Implemented and verified a cross-platform Xi-AI Codex configurator with hidden k
 ### Status
 
 [OK] **Completed**
+
+
+## Session 2: GitHub Release Codex bootstrap
+
+**Date**: 2026-08-18
+**Task**: GitHub Release Codex bootstrap
+**Branch**: `master`
+
+### Summary
+
+Implemented cross-platform Codex discovery, safe detect-only mode, verified GitHub Releases bootstrap and packaging, release workflow, tests, documentation, and local release smoke validation.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `f3d31b3` | (see git log) |
+| `73f410c` | (see git log) |
+
+### Status
+
+[OK] **Completed**
