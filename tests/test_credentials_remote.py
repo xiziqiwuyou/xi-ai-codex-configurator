@@ -3,7 +3,7 @@ import json
 import unittest
 from urllib.error import HTTPError
 
-from codex_configurator.credentials import prompt_token
+from codex_configurator.credentials import _read_masked_chars, prompt_token
 from codex_configurator.errors import CredentialError, RemoteModelError
 from codex_configurator.remote_models import fetch_remote_model_ids
 
@@ -23,6 +23,31 @@ class FakeResponse:
 
 
 class CredentialTests(unittest.TestCase):
+    def test_masked_reader_shows_asterisks_for_paste_and_backspace(self):
+        characters = iter("abc\bde\r")
+        output = []
+
+        token = _read_masked_chars(lambda: next(characters), output.append)
+
+        self.assertEqual(token, "abde")
+        self.assertEqual("".join(output), "***\b \b**\n")
+
+    def test_masked_reader_keeps_secret_out_of_output(self):
+        characters = iter("super-secret\r")
+        output = []
+
+        token = _read_masked_chars(lambda: next(characters), output.append)
+
+        self.assertEqual(token, "super-secret")
+        self.assertEqual("".join(output), "*" * len(token) + "\n")
+        self.assertNotIn(token, "".join(output))
+
+    def test_masked_reader_preserves_cancel_behavior(self):
+        characters = iter("abc\x03")
+
+        with self.assertRaises(KeyboardInterrupt):
+            _read_masked_chars(lambda: next(characters), lambda _: None)
+
     def test_prompts_for_secret_exactly_once(self):
         enter_prompts = []
         secret_prompts = []

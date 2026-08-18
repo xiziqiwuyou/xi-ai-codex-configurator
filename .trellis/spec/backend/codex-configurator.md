@@ -81,8 +81,10 @@ wire_api = "responses"
 experimental_bearer_token = "<local token>"
 ```
 
-The token is accepted only from one hidden prompt. It is never read from an
-environment variable or command-line argument.
+The token is accepted only from one masked prompt. Each received character is
+echoed as `*`; backspace removes the last mask character. The token itself is
+never echoed, read from an environment variable, or accepted as a command-line
+argument.
 
 `setup --detect-only` prints discovery information and returns without reading
 the token, calling Xi-AI, or writing configuration, catalog, rollout, SQLite,
@@ -114,7 +116,7 @@ The release manifest schema is:
 ```json
 {
   "schema_version": 1,
-  "version": "v0.2.0",
+  "version": "v0.2.1",
   "bundle": {
     "name": "xi-ai-codex-bundle.zip",
     "sha256": "<64 lowercase hex characters>",

@@ -64,7 +64,7 @@ Windows PowerShell:
 
 ```powershell
 $repo = "OWNER/REPO"
-$tag = "v0.2.0"
+$tag = "v0.2.1"
 $dir = Join-Path $env:TEMP "xi-ai-codex-bootstrap"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -OutFile (Join-Path $dir "xi-ai-codex-bootstrap.py")
@@ -80,7 +80,7 @@ macOS/Linux:
 
 ```sh
 repo="OWNER/REPO"
-tag="v0.2.0"
+tag="v0.2.1"
 dir="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"
 mkdir -p "$dir"
 curl --fail --location "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -o "$dir/xi-ai-codex-bootstrap.py"
@@ -97,8 +97,8 @@ conversation metadata are merged on the target computer.
 Pushing a version tag triggers the release workflow. For example:
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.2.1
+git push origin v0.2.1
 ```
 
 The workflow runs the full test suite, packages the five assets above, and
@@ -205,7 +205,9 @@ Restart Codex after setup or restore.
 
 ## Security
 
-- The token is requested exactly once through hidden input.
+- The token is requested exactly once through masked input.
+- Each received token character is shown only as `*`, so paste is visible
+  without exposing the token.
 - Tokens are not accepted through command-line arguments or environment
   variables.
 - Tokens are never printed or stored in manifests/tests.

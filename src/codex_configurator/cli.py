@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import argparse
-import getpass
 import sys
 from pathlib import Path
 from urllib.request import urlopen
 
 from .catalog import catalog_bytes, load_bundled_catalog, merge_catalog
-from .credentials import prompt_token
+from .credentials import prompt_token, read_masked_secret
 from .discovery import DiscoveryResult, discover
 from .endpoints import PROVIDER_ID
 from .errors import ConfiguratorError
@@ -92,7 +91,7 @@ def _setup(
     args,
     *,
     input_fn=input,
-    secret_fn=getpass.getpass,
+    secret_fn=read_masked_secret,
     opener=urlopen,
     output=print,
 ) -> int:
@@ -224,7 +223,7 @@ def main(
     argv: list[str] | None = None,
     *,
     input_fn=input,
-    secret_fn=getpass.getpass,
+    secret_fn=read_masked_secret,
     opener=urlopen,
     output=print,
 ) -> int:
