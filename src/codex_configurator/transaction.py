@@ -281,10 +281,14 @@ def apply_setup(
     changes: SetupChanges,
     *,
     fail_at: str | None = None,
+    allow_wal_recovery: bool = False,
 ) -> Path:
     codex_home.mkdir(parents=True, exist_ok=True)
     if changes.migrate_sessions:
-        ensure_sqlite_ready(sqlite_path(codex_home))
+        ensure_sqlite_ready(
+            sqlite_path(codex_home),
+            allow_wal_recovery=allow_wal_recovery,
+        )
     backup_dir = create_backup(codex_home, changes)
     try:
         atomic_write(changes.config_path, changes.config_content)

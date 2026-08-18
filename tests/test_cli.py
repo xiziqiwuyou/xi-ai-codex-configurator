@@ -9,6 +9,7 @@ from codex_configurator.cli import main
 from codex_configurator.desktop_control import DesktopCloseResult
 from codex_configurator.discovery import DesktopProcess, DiscoveryResult
 from codex_configurator.errors import DesktopControlError
+from codex_configurator.transaction import apply_setup as apply_setup_transaction
 
 
 class FakeResponse:
@@ -232,6 +233,99 @@ class CliTests(unittest.TestCase):
             self.assertIn("正在关闭", rendered)
             self.assertIn("已正常退出", rendered)
             self.assertNotIn("placeholder-key", rendered)
+
+    def test_migration_without_initial_desktop_runs_two_fresh_checks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            database = home / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)"
+            )
+            connection.commit()
+            connection.close()
+            answers = iter(["", "1", "y"])
+            checks = []
+            discovery = DiscoveryResult(
+                home,
+                Path("C:/Tools/codex.exe"),
+                "0.144.1",
+            )
+
+            with patch(
+                "codex_configurator.cli.discover", return_value=discovery
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.apply_setup",
+                wraps=apply_setup_transaction,
+            ) as setup:
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    opener=lambda request, timeout: FakeResponse(),
+                    output=lambda value: None,
+                    process_detector=lambda **kwargs: checks.append("checked")
+                    or ((), ()),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(checks, ["checked", "checked"])
+            self.assertTrue(setup.call_args.kwargs["allow_wal_recovery"])
+
+    def test_backend_reappearing_before_apply_aborts_without_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            rollout = home / "sessions/2026/08/19/rollout-test.jsonl"
+            rollout.parent.mkdir(parents=True)
+            rollout.write_text(
+                '{"type":"session_meta","payload":{"model_provider":"openai"}}\n',
+                encoding="utf-8",
+            )
+            database = home / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)"
+            )
+            connection.commit()
+            connection.close()
+            before = {rollout: rollout.read_bytes(), database: database.read_bytes()}
+            answers = iter(["", "1", "y"])
+            respawned = DesktopProcess(
+                88,
+                Path("C:/Apps/Codex/resources/codex.exe"),
+                "codex.exe app-server",
+                "test",
+            )
+            checks = iter([((), ()), ((respawned,), ())])
+            discovery = DiscoveryResult(
+                home,
+                Path("C:/Tools/codex.exe"),
+                "0.144.1",
+            )
+
+            with patch(
+                "codex_configurator.cli.discover", return_value=discovery
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ):
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    opener=lambda request, timeout: FakeResponse(),
+                    output=lambda value: None,
+                    process_detector=lambda **kwargs: next(checks),
+                )
+
+            self.assertEqual(result, 1)
+            self.assertFalse((home / "config.toml").exists())
+            self.assertFalse((home / "xi-ai-model-catalog.json").exists())
+            for path, content in before.items():
+                self.assertEqual(path.read_bytes(), content)
 
     def test_close_failure_aborts_before_writing(self):
         with tempfile.TemporaryDirectory() as temp:

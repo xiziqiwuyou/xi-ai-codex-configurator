@@ -1,5 +1,6 @@
 import json
 import os
+import shutil
 import sqlite3
 import tempfile
 import unittest
@@ -8,6 +9,7 @@ from unittest.mock import patch
 
 from codex_configurator.errors import SessionMigrationError, TransactionError
 from codex_configurator.sessions import (
+    backup_sqlite,
     collect_rollout_changes,
     ensure_sqlite_ready,
     update_sqlite_provider,
@@ -36,6 +38,33 @@ def create_state_database(path: Path, provider: str = "openai"):
     )
     connection.commit()
     connection.close()
+
+
+def create_retained_wal_database(path: Path) -> None:
+    source = path.with_name("wal-source.sqlite")
+    connection = sqlite3.connect(source)
+    try:
+        connection.execute("PRAGMA journal_mode = WAL")
+        connection.execute("PRAGMA wal_autocheckpoint = 0")
+        connection.execute("CREATE TABLE sample (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO sample VALUES ('from-wal')")
+        connection.execute(
+            """CREATE TABLE threads (
+                id TEXT PRIMARY KEY,
+                model_provider TEXT NOT NULL,
+                has_user_event INTEGER NOT NULL DEFAULT 0,
+                first_user_message TEXT NOT NULL DEFAULT '',
+                thread_source TEXT
+            )"""
+        )
+        connection.execute(
+            "INSERT INTO threads VALUES ('thread-wal', 'openai', 0, 'hello', NULL)"
+        )
+        connection.commit()
+        for suffix in ("", "-wal", "-shm"):
+            shutil.copy2(Path(f"{source}{suffix}"), Path(f"{path}{suffix}"))
+    finally:
+        connection.close()
 
 
 class SessionTests(unittest.TestCase):
@@ -106,6 +135,58 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(wal.read_bytes(), b"wal")
             self.assertEqual(shm.read_bytes(), b"shm")
 
+    def test_verified_migration_recovers_valid_retained_wal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "state_5.sqlite"
+            backup = Path(temp) / "backup.sqlite"
+            create_retained_wal_database(database)
+
+            ensure_sqlite_ready(database, allow_wal_recovery=True)
+            self.assertTrue(backup_sqlite(database, backup))
+
+            connection = sqlite3.connect(backup)
+            try:
+                self.assertEqual(
+                    connection.execute("PRAGMA integrity_check").fetchone()[0],
+                    "ok",
+                )
+                self.assertEqual(
+                    connection.execute("SELECT value FROM sample").fetchone()[0],
+                    "from-wal",
+                )
+            finally:
+                connection.close()
+
+    def test_verified_migration_rejects_active_wal_reader(self):
+        with tempfile.TemporaryDirectory() as temp:
+            database = Path(temp) / "state_5.sqlite"
+            writer = sqlite3.connect(database)
+            reader = None
+            try:
+                writer.execute("PRAGMA journal_mode = WAL")
+                writer.execute("PRAGMA wal_autocheckpoint = 0")
+                writer.execute("CREATE TABLE sample (value TEXT NOT NULL)")
+                writer.execute("INSERT INTO sample VALUES ('first')")
+                writer.commit()
+                reader = sqlite3.connect(database)
+                reader.execute("BEGIN")
+                reader.execute("SELECT value FROM sample").fetchall()
+                writer.execute("INSERT INTO sample VALUES ('second')")
+                writer.commit()
+
+                with self.assertRaises(SessionMigrationError):
+                    ensure_sqlite_ready(database, allow_wal_recovery=True)
+
+                self.assertEqual(
+                    writer.execute("SELECT COUNT(*) FROM sample").fetchone()[0],
+                    2,
+                )
+            finally:
+                if reader is not None:
+                    reader.rollback()
+                    reader.close()
+                writer.close()
+
 
 class TransactionTests(unittest.TestCase):
     def _make_changes(self, home: Path) -> tuple[SetupChanges, dict[Path, bytes]]:
@@ -164,6 +245,54 @@ class TransactionTests(unittest.TestCase):
                     create_backup(home, changes)
             backup_root = home / "backup-xi-ai"
             self.assertFalse(list(backup_root.iterdir()))
+
+    def test_verified_setup_backs_up_then_migrates_retained_wal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            config = home / "config.toml"
+            catalog = home / "xi-ai-model-catalog.json"
+            rollout = home / "sessions/2026/08/19/rollout-test.jsonl"
+            rollout.parent.mkdir(parents=True)
+            config.write_text('model = "old"\n', encoding="utf-8")
+            catalog.write_text('{"models":[{"slug":"old"}]}\n', encoding="utf-8")
+            rollout.write_text(
+                '{"type":"session_meta","payload":{"model_provider":"openai"}}\n',
+                encoding="utf-8",
+            )
+            create_retained_wal_database(home / "state_5.sqlite")
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=catalog,
+                catalog_content=b'{"models":[{"slug":"new"}]}\n',
+                rollout_changes=tuple(collect_rollout_changes(home, "xi_ai")),
+                migrate_sessions=True,
+            )
+
+            backup = apply_setup(home, changes, allow_wal_recovery=True)
+
+            migrated = sqlite3.connect(home / "state_5.sqlite")
+            original = sqlite3.connect(backup / "db/state_5.sqlite")
+            try:
+                self.assertEqual(
+                    migrated.execute(
+                        "SELECT model_provider FROM threads WHERE id = 'thread-wal'"
+                    ).fetchone()[0],
+                    "xi_ai",
+                )
+                self.assertEqual(
+                    original.execute(
+                        "SELECT model_provider FROM threads WHERE id = 'thread-wal'"
+                    ).fetchone()[0],
+                    "openai",
+                )
+                self.assertEqual(
+                    original.execute("SELECT value FROM sample").fetchone()[0],
+                    "from-wal",
+                )
+            finally:
+                migrated.close()
+                original.close()
 
     def test_successful_setup_can_be_restored(self):
         with tempfile.TemporaryDirectory() as temp:

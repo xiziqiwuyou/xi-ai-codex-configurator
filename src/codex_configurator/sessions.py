@@ -105,11 +105,13 @@ def backup_sqlite(path: Path, destination: Path) -> bool:
     return True
 
 
-def ensure_sqlite_ready(path: Path) -> None:
+def ensure_sqlite_ready(
+    path: Path, *, allow_wal_recovery: bool = False
+) -> None:
     if not path.is_file():
         return
     sidecars = (Path(f"{path}-wal"), Path(f"{path}-shm"))
-    if any(sidecar.exists() for sidecar in sidecars):
+    if not allow_wal_recovery and any(sidecar.exists() for sidecar in sidecars):
         raise SessionMigrationError(
             "Codex 会话数据库正在使用中；请完全退出 Codex 后重试"
         )
@@ -117,8 +119,29 @@ def ensure_sqlite_ready(path: Path) -> None:
     try:
         connection = sqlite3.connect(path)
         connection.execute("PRAGMA busy_timeout = 3000")
-        connection.execute("BEGIN EXCLUSIVE")
+        if allow_wal_recovery:
+            journal_mode = connection.execute("PRAGMA journal_mode").fetchone()
+            if journal_mode and str(journal_mode[0]).lower() == "wal":
+                checkpoint = connection.execute(
+                    "PRAGMA wal_checkpoint(RESTART)"
+                ).fetchone()
+                if checkpoint is None or int(checkpoint[0]) != 0:
+                    raise SessionMigrationError(
+                        "Codex 会话数据库仍被其他连接使用；已停止配置"
+                    )
+            quick_check = [
+                str(row[0]) for row in connection.execute("PRAGMA quick_check")
+            ]
+            if quick_check != ["ok"]:
+                raise SessionMigrationError(
+                    "Codex 会话数据库完整性检查失败；已停止配置"
+                )
+            connection.execute("BEGIN IMMEDIATE")
+        else:
+            connection.execute("BEGIN EXCLUSIVE")
         connection.rollback()
+    except SessionMigrationError:
+        raise
     except sqlite3.Error as exc:
         raise SessionMigrationError(
             "Codex 会话数据库正在使用中；请完全退出 Codex 后重试"

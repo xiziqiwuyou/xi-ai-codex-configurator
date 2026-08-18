@@ -88,6 +88,20 @@ def _choose_session_migration(*, input_fn=input) -> bool:
     return value in {"y", "yes"}
 
 
+def _require_no_desktop_processes(detector, *, after_close: bool) -> None:
+    remaining, warnings = detector()
+    if warnings:
+        raise ConfiguratorError(
+            "无法重新检查 Codex 桌面进程，已停止配置"
+        )
+    if remaining:
+        state = "已重新出现" if after_close else "仍在运行"
+        raise ConfiguratorError(
+            f"Codex 桌面后端{state}"
+            f"（PID {remaining[0].pid}），已在写入前停止配置"
+        )
+
+
 def _read_existing_config(path: Path) -> str:
     if not path.is_file():
         return ""
@@ -127,6 +141,7 @@ def _setup(
     migrate_sessions = _choose_session_migration(input_fn=input_fn)
 
     desktop_was_closed = False
+    detect_processes = process_detector or discover_running_codex_processes
     if migrate_sessions:
         if result.executable is None or result.version is None:
             raise ConfiguratorError("迁移对话需要检测到可运行的 Codex 及其版本")
@@ -154,20 +169,12 @@ def _setup(
                         "Codex 已正常退出"
                         f"（根 PID {close_result.root_pid}）。"
                     )
-                detect_processes = (
-                    process_detector or discover_running_codex_processes
-                )
-                remaining, warnings = detect_processes()
-                if warnings:
-                    raise ConfiguratorError(
-                        "Codex 关闭后无法重新检查桌面进程，已停止配置"
-                    )
-                if remaining:
-                    raise ConfiguratorError(
-                        "Codex 桌面后端已重新出现"
-                        f"（PID {remaining[0].pid}），已在写入前停止配置"
-                    )
                 desktop_was_closed = True
+        if not args.dry_run:
+            _require_no_desktop_processes(
+                detect_processes,
+                after_close=desktop_was_closed,
+            )
 
     config_path = result.codex_home / "config.toml"
     catalog_path = result.codex_home / "xi-ai-model-catalog.json"
@@ -199,6 +206,12 @@ def _setup(
         output("试运行完成：未写入任何文件。")
         return 0
 
+    if migrate_sessions:
+        _require_no_desktop_processes(
+            detect_processes,
+            after_close=True,
+        )
+
     changes = SetupChanges(
         config_path=config_path,
         config_content=config_content,
@@ -207,7 +220,11 @@ def _setup(
         rollout_changes=rollout_changes,
         migrate_sessions=migrate_sessions,
     )
-    backup_dir = apply_setup(result.codex_home, changes)
+    backup_dir = apply_setup(
+        result.codex_home,
+        changes,
+        allow_wal_recovery=migrate_sessions,
+    )
     validated = validate_installed(result.codex_home)
     output(f"Xi-AI 配置完成，默认模型：{validated['model']}")
     output(f"备份已创建：{backup_dir}")

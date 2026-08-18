@@ -83,7 +83,7 @@ Windows PowerShell:
 
 ```powershell
 $repo = "OWNER/REPO"
-$tag = "v0.3.0"
+$tag = "v0.3.1"
 $dir = Join-Path $env:TEMP "xi-ai-codex-bootstrap"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -OutFile (Join-Path $dir "xi-ai-codex-bootstrap.py")
@@ -99,7 +99,7 @@ macOS/Linux:
 
 ```sh
 repo="OWNER/REPO"
-tag="v0.3.0"
+tag="v0.3.1"
 dir="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"
 mkdir -p "$dir"
 curl --fail --location "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -o "$dir/xi-ai-codex-bootstrap.py"
@@ -116,8 +116,8 @@ conversation metadata are merged on the target computer.
 Pushing a version tag triggers the release workflow. For example:
 
 ```sh
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.3.1
+git push origin v0.3.1
 ```
 
 The workflow runs the full test suite, packages the five assets above, and
@@ -195,7 +195,12 @@ GUI root and backend PIDs. It never stops processes by name.
 Run setup from a system PowerShell/Terminal. If setup is running inside the
 detected Codex process tree, it aborts before signaling or writing so it cannot
 terminate itself halfway through migration. After shutdown, the script checks
-for a respawned backend plus SQLite WAL/SHM and locking state before mutation.
+for a respawned backend twice: before session inspection and immediately before
+the transaction. A retained SQLite WAL/SHM pair is not treated as process
+ownership by itself. After both process checks pass, SQLite performs a RESTART
+checkpoint, integrity check and write-lock probe before creating the backup.
+Never delete WAL/SHM manually because the WAL can contain committed data that
+has not yet reached the main database file.
 
 ## Commands
 

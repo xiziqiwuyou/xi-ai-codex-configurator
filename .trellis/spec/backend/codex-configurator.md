@@ -57,7 +57,14 @@ Core storage signatures are:
 def merge_config(existing: str, *, model: str, catalog_path: Path, token: str) -> str
 def fetch_remote_model_ids(token: str, *, url: str = MODELS_URL, opener=urlopen) -> list[str]
 def update_sqlite_provider(path: Path, target_provider: str) -> int
-def apply_setup(codex_home: Path, changes: SetupChanges, *, fail_at: str | None = None) -> Path
+def ensure_sqlite_ready(path: Path, *, allow_wal_recovery: bool = False) -> None
+def apply_setup(
+    codex_home: Path,
+    changes: SetupChanges,
+    *,
+    fail_at: str | None = None,
+    allow_wal_recovery: bool = False,
+) -> Path
 def restore_backup(codex_home: Path, backup_dir: Path) -> None
 ```
 
@@ -148,7 +155,7 @@ The release manifest schema is:
 ```json
 {
   "schema_version": 1,
-  "version": "v0.3.0",
+  "version": "v0.3.1",
   "bundle": {
     "name": "xi-ai-codex-bundle.zip",
     "sha256": "<64 lowercase hex characters>",
@@ -194,7 +201,17 @@ not open the session database or rewrite rollout files.
 
 When `Y` is selected with an active desktop, successful shutdown and fresh
 no-backend discovery are required in the same setup run before session
-inspection and migration continue.
+inspection and migration continue. Normal `setup + Y` always performs fresh
+discovery before session inspection, even when initial discovery found no
+desktop, and repeats discovery immediately before applying the transaction.
+
+WAL/SHM existence is database-state evidence, not proof of an active process.
+Only after both process gates pass may the CLI authorize retained-WAL recovery.
+SQLite then performs a bounded `wal_checkpoint(RESTART)`, requires
+`PRAGMA quick_check` to return `ok`, and verifies a `BEGIN IMMEDIATE` write
+transaction before backup. Direct transaction callers and restore keep the
+default sidecar rejection behavior. Code must never delete or separate a WAL
+from its main database because committed pages may exist only in the WAL.
 
 ### Backup and restore
 
@@ -214,7 +231,9 @@ token. SQLite backups use `VACUUM INTO` before mutation.
 | HTTP 401/403 or malformed model JSON | exit with no target-file writes |
 | Missing/duplicate catalog slug | exit with no target-file writes |
 | Unsupported SQLite schema | reject `Y` before mutation |
-| Existing SQLite WAL/SHM or exclusive-lock failure | reject `Y` and preserve sidecars |
+| Existing SQLite WAL/SHM without explicit process-verified recovery authorization | reject and preserve sidecars |
+| Authorized retained WAL with successful RESTART checkpoint, quick check and write lock | continue to `VACUUM INTO` backup |
+| RESTART checkpoint is busy, quick check fails, or write lock cannot be acquired | reject before target business-data writes |
 | Any mutation phase fails | restore all affected files and SQLite snapshot |
 | Restore path is outside `backup-xi-ai` | reject before writing |
 | Restore manifest has invalid paths, hashes, schema, or duplicate targets | reject before writing |
@@ -242,6 +261,8 @@ raw response bodies.
   `config.toml`, the generated catalog, and a manifest.
 - Good: `Y` changes provider metadata in local rollout/SQLite records while
   preserving all message content and timestamps.
+- Good: Codex is absent but a valid WAL/SHM pair remains; SQLite checkpoints
+  and validates it, then `VACUUM INTO` preserves committed WAL content.
 - Bad: `N` opens SQLite to inspect or rewrite it; this violates the strict
   no-session-write branch.
 - Bad: using `https://api.xi-ai.cn` as `base_url` or appending `/v1` twice;
@@ -254,6 +275,8 @@ raw response bodies.
   close that exact root, not every `ChatGPT.exe` process.
 - Bad: setup runs inside the target backend and attempts to close its own
   ancestor; reject before sending a close request.
+- Bad: deleting WAL/SHM to bypass readiness; committed transactions can be
+  lost when the WAL has not been checkpointed into the main database.
 - Bad: a force branch uses `Stop-Process -Name` or sends a signal without a
   fresh identity check.
 - Bad: deriving `CODEX_HOME` from `C:\\Program Files\\WindowsApps\\...`; the
@@ -276,11 +299,14 @@ raw response bodies.
 - Catalog/TOML tests assert bundled retention, remote append, provider-table
   replacement, and preservation of MCP/profiles/projects/unknown settings.
 - Session tests assert rollout-only provider edits, SQLite visibility repair,
-  preservation of non-empty `thread_source`, and WAL/SHM refusal.
+  preservation of non-empty `thread_source`, conservative default sidecar
+  refusal, authorized retained-WAL recovery, busy-reader rejection, and backup
+  preservation of committed WAL data.
 - Transaction tests inject failure after config, catalog, rollout, and SQLite
   phases and assert original bytes/hashes are restored.
 - CLI tests assert `N` leaves session/database bytes unchanged and `Y` without
-  a detected Codex version performs no writes.
+  a detected Codex version performs no writes. Migration tests assert two fresh
+  process checks and explicit recovery authorization at the transaction boundary.
 - Restore tests reject outside-root paths, corrupt hashes, duplicate targets,
   and malformed manifests before writing.
 - Launcher checks include PowerShell parsing and POSIX `sh -n` when a POSIX
@@ -349,6 +375,24 @@ update_sqlite_provider(Path("state_5.sqlite"), "xi_ai")
 ```
 
 The `Y` branch performs only local metadata repair after a complete backup.
+
+### Wrong
+
+```python
+Path(f"{database}-wal").unlink(missing_ok=True)
+```
+
+Deleting a retained WAL can discard committed pages that are not yet present in
+the main database.
+
+### Correct
+
+```python
+ensure_sqlite_ready(database, allow_wal_recovery=True)
+```
+
+This capability is used only after fresh Codex process verification and lets
+SQLite checkpoint and validate its own persistent state.
 
 ### Wrong
 
