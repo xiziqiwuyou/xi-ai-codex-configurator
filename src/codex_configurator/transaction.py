@@ -42,7 +42,7 @@ def _relative_to_home(path: Path, codex_home: Path) -> Path:
     try:
         return path.resolve().relative_to(codex_home.resolve())
     except ValueError as exc:
-        raise TransactionError(f"Refusing to modify a path outside CODEX_HOME: {path}") from exc
+        raise TransactionError(f"拒绝修改 CODEX_HOME 之外的路径：{path}") from exc
 
 
 def atomic_write(path: Path, content: bytes, *, mtime_ns: int | None = None) -> None:
@@ -141,69 +141,69 @@ def _load_manifest(codex_home: Path, backup_dir: Path) -> dict:
     try:
         resolved.relative_to(root)
     except ValueError as exc:
-        raise TransactionError("Backup path is outside the Xi-AI backup root") from exc
+        raise TransactionError("备份路径位于 Xi-AI 备份根目录之外") from exc
     if resolved == root or resolved.parent != root:
-        raise TransactionError("Backup path is not a Xi-AI backup directory")
+        raise TransactionError("该路径不是有效的 Xi-AI 备份目录")
     manifest_path = resolved / "manifest.json"
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise TransactionError("Backup manifest is missing or invalid") from exc
+        raise TransactionError("备份清单缺失或无效") from exc
     if not isinstance(manifest, dict):
-        raise TransactionError("Backup manifest is missing or invalid")
+        raise TransactionError("备份清单缺失或无效")
     if manifest.get("version") != 1 or not isinstance(
         manifest.get("session_migration"), bool
     ):
-        raise TransactionError("Backup manifest has an unsupported format")
+        raise TransactionError("备份清单格式不受支持")
     if manifest.get("provider") != PROVIDER_ID:
-        raise TransactionError("Backup manifest does not belong to Xi-AI")
+        raise TransactionError("备份清单不属于 Xi-AI")
     manifest_home = manifest.get("codex_home")
     if not isinstance(manifest_home, str):
-        raise TransactionError("Backup manifest has an invalid CODEX_HOME")
+        raise TransactionError("备份清单中的 CODEX_HOME 无效")
     if Path(manifest_home).resolve() != codex_home.resolve():
-        raise TransactionError("Backup manifest belongs to another CODEX_HOME")
+        raise TransactionError("备份清单属于另一个 CODEX_HOME")
     if not isinstance(manifest.get("files"), list):
-        raise TransactionError("Backup manifest has invalid file entries")
+        raise TransactionError("备份清单中的文件条目无效")
     sqlite_entry = manifest.get("sqlite")
     if not isinstance(sqlite_entry, dict) or not isinstance(
         sqlite_entry.get("existed"), bool
     ):
-        raise TransactionError("Backup manifest has invalid SQLite metadata")
+        raise TransactionError("备份清单中的 SQLite 元数据无效")
     if sqlite_entry.get("path") != "state_5.sqlite":
-        raise TransactionError("Backup manifest has an invalid SQLite path")
+        raise TransactionError("备份清单中的 SQLite 路径无效")
     return manifest
 
 
 def _resolved_backup_source(backup_dir: Path, relative: str) -> Path:
     if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
-        raise TransactionError("Backup manifest contains an invalid source path")
+        raise TransactionError("备份清单包含无效的源路径")
     source = (backup_dir / relative).resolve()
     try:
         source.relative_to(backup_dir.resolve())
     except ValueError as exc:
-        raise TransactionError("Backup manifest contains an outside-root path") from exc
+        raise TransactionError("备份清单包含根目录之外的路径") from exc
     return source
 
 
 def _manifest_target(codex_home: Path, relative: object) -> Path:
     if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
-        raise TransactionError("Backup manifest contains an invalid target path")
+        raise TransactionError("备份清单包含无效的目标路径")
     target = codex_home / relative
     _relative_to_home(target, codex_home)
     try:
         target.resolve().relative_to((codex_home / "backup-xi-ai").resolve())
     except ValueError:
         return target
-    raise TransactionError("Backup manifest targets its own backup directory")
+    raise TransactionError("备份清单将自身备份目录设为了目标")
 
 
 def _validate_hash(value: object, *, label: str) -> str:
     if not isinstance(value, str) or len(value) != 64:
-        raise TransactionError(f"Backup manifest has an invalid {label} hash")
+        raise TransactionError(f"备份清单中的 {label} 哈希无效")
     try:
         int(value, 16)
     except ValueError as exc:
-        raise TransactionError(f"Backup manifest has an invalid {label} hash") from exc
+        raise TransactionError(f"备份清单中的 {label} 哈希无效") from exc
     return value
 
 
@@ -213,20 +213,20 @@ def restore_backup(codex_home: Path, backup_dir: Path) -> None:
     seen_targets: set[Path] = set()
     for entry in manifest.get("files", []):
         if not isinstance(entry, dict) or not isinstance(entry.get("existed"), bool):
-            raise TransactionError("Backup manifest has invalid file metadata")
+            raise TransactionError("备份清单中的文件元数据无效")
         target = _manifest_target(codex_home, entry.get("path"))
         resolved_target = target.resolve()
         if resolved_target in seen_targets:
-            raise TransactionError("Backup manifest contains duplicate file paths")
+            raise TransactionError("备份清单包含重复文件路径")
         seen_targets.add(resolved_target)
         if entry["existed"]:
             source = _resolved_backup_source(backup_dir, entry.get("backup"))
             expected_hash = _validate_hash(entry.get("sha256"), label="file")
             if not source.is_file() or sha256_file(source) != expected_hash:
-                raise TransactionError(f"Backup file is missing or corrupt: {entry['path']}")
+                raise TransactionError(f"备份文件缺失或损坏：{entry['path']}")
             mtime_ns = entry.get("mtime_ns")
             if not isinstance(mtime_ns, int):
-                raise TransactionError("Backup manifest has an invalid file timestamp")
+                raise TransactionError("备份清单中的文件时间戳无效")
             restore_entries.append((entry, target, source, expected_hash, mtime_ns))
         else:
             restore_entries.append((entry, target, None, None, None))
@@ -238,7 +238,7 @@ def restore_backup(codex_home: Path, backup_dir: Path) -> None:
         sqlite_source = _resolved_backup_source(backup_dir, sqlite_entry.get("backup"))
         sqlite_hash = _validate_hash(sqlite_entry.get("sha256"), label="SQLite")
         if not sqlite_source.is_file() or sha256_file(sqlite_source) != sqlite_hash:
-            raise TransactionError("SQLite backup is missing or corrupt")
+            raise TransactionError("SQLite 备份缺失或损坏")
     if sqlite_entry.get("existed") or manifest.get("session_migration"):
         ensure_sqlite_ready(sqlite_path(codex_home))
 
@@ -259,20 +259,20 @@ def restore_backup(codex_home: Path, backup_dir: Path) -> None:
         if entry["existed"]:
             assert expected_hash is not None
             if not target.is_file() or sha256_file(target) != expected_hash:
-                raise TransactionError(f"Restored file hash mismatch: {entry['path']}")
+                raise TransactionError(f"恢复后的文件哈希不匹配：{entry['path']}")
         elif target.exists():
-            raise TransactionError(f"New file was not removed during restore: {entry['path']}")
+            raise TransactionError(f"恢复时未删除新增文件：{entry['path']}")
     if sqlite_source is not None and (
         not database.is_file() or sha256_file(database) != sqlite_hash
     ):
-        raise TransactionError("Restored SQLite hash mismatch")
+        raise TransactionError("恢复后的 SQLite 哈希不匹配")
 
 
 def latest_backup(codex_home: Path) -> Path:
     root = codex_home / "backup-xi-ai"
     backups = sorted(path for path in root.glob("*") if (path / "manifest.json").is_file())
     if not backups:
-        raise TransactionError("No Xi-AI backup is available")
+        raise TransactionError("没有可用的 Xi-AI 备份")
     return backups[-1]
 
 
@@ -306,7 +306,7 @@ def apply_setup(
             restore_backup(codex_home, backup_dir)
         except Exception as restore_exc:
             raise TransactionError(
-                f"Setup failed and automatic restore also failed: {restore_exc}"
+                f"配置失败，自动恢复也失败：{restore_exc}"
             ) from exc
-        raise TransactionError(f"Setup failed and was rolled back: {exc}") from exc
+        raise TransactionError(f"配置失败，已自动回滚：{exc}") from exc
     return backup_dir

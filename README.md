@@ -64,7 +64,7 @@ Windows PowerShell:
 
 ```powershell
 $repo = "OWNER/REPO"
-$tag = "v0.2.1"
+$tag = "v0.2.2"
 $dir = Join-Path $env:TEMP "xi-ai-codex-bootstrap"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -OutFile (Join-Path $dir "xi-ai-codex-bootstrap.py")
@@ -80,7 +80,7 @@ macOS/Linux:
 
 ```sh
 repo="OWNER/REPO"
-tag="v0.2.1"
+tag="v0.2.2"
 dir="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"
 mkdir -p "$dir"
 curl --fail --location "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -o "$dir/xi-ai-codex-bootstrap.py"
@@ -97,8 +97,8 @@ conversation metadata are merged on the target computer.
 Pushing a version tag triggers the release workflow. For example:
 
 ```sh
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.2.2
+git push origin v0.2.2
 ```
 
 The workflow runs the full test suite, packages the five assets above, and
@@ -109,7 +109,7 @@ The setup flow is interactive:
 
 1. The runnable Codex CLI, running desktop backend, version, and `CODEX_HOME`
    are detected and displayed with their discovery sources.
-2. Press Enter, then enter the API token using the hidden prompt.
+2. Press Enter, then enter the API token using the masked prompt.
 3. The tool fetches the Xi-AI model list.
 4. Select a default model from the numbered menu.
 5. Choose whether existing conversations should be visible under `xi_ai`.

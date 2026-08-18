@@ -41,7 +41,7 @@ def merge_config(
     token: str,
 ) -> str:
     if "\x00" in existing:
-        raise ConfigurationError("Codex config contains a NUL byte")
+        raise ConfigurationError("Codex 配置中包含 NUL 字节")
     source = existing.lstrip("\ufeff")
     lines = source.splitlines(keepends=True)
     first_table = next(
@@ -90,5 +90,5 @@ def merge_config(
     try:
         tomllib.loads(content)
     except tomllib.TOMLDecodeError as exc:
-        raise ConfigurationError(f"Generated Codex TOML is invalid: {exc}") from exc
+        raise ConfigurationError(f"生成的 Codex TOML 无效：{exc}") from exc
     return content

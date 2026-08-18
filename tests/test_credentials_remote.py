@@ -60,6 +60,8 @@ class CredentialTests(unittest.TestCase):
         self.assertEqual(token, "secret-token")
         self.assertEqual(len(enter_prompts), 1)
         self.assertEqual(len(secret_prompts), 1)
+        self.assertIn("输入时仅显示星号", enter_prompts[0])
+        self.assertEqual(secret_prompts[0], "Xi-AI API Key：")
 
     def test_empty_secret_is_rejected(self):
         with self.assertRaises(CredentialError):
@@ -89,7 +91,7 @@ class RemoteModelTests(unittest.TestCase):
         def opener(request, timeout):
             raise HTTPError(request.full_url, 401, "Unauthorized", {}, io.BytesIO())
 
-        with self.assertRaisesRegex(RemoteModelError, "rejected") as context:
+        with self.assertRaisesRegex(RemoteModelError, "拒绝") as context:
             fetch_remote_model_ids("top-secret", opener=opener)
         self.assertNotIn("top-secret", str(context.exception))
 

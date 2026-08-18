@@ -218,7 +218,7 @@ def find_codex_executable(
     if explicit:
         candidate = _resolved_path(Path(explicit))
         if not _is_file(candidate):
-            raise DiscoveryError(f"Codex executable does not exist: {candidate}")
+            raise DiscoveryError(f"Codex 可执行文件不存在：{candidate}")
         return candidate
 
     environment = os.environ if env is None else env
@@ -272,10 +272,10 @@ def detect_codex_version(
             timeout=15,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise DiscoveryError(f"Unable to run Codex: {exc}") from exc
+        raise DiscoveryError(f"无法运行 Codex：{exc}") from exc
     match = VERSION_RE.search(result.stdout or result.stderr)
     if not match:
-        raise DiscoveryError("Codex version output was not recognized")
+        raise DiscoveryError("无法识别 Codex 版本输出")
     return match.group("version")
 
 
@@ -313,7 +313,7 @@ def _powershell_executable() -> str | None:
 def _windows_process_records(*, runner=subprocess.run) -> list[ProcessRecord]:
     shell = _powershell_executable()
     if not shell:
-        raise OSError("PowerShell is unavailable")
+        raise OSError("PowerShell 不可用")
     script = (
         "$items = @(Get-CimInstance Win32_Process | "
         "Where-Object { $_.Name -ieq 'codex.exe' } | "
@@ -413,7 +413,7 @@ def discover_running_codex_processes(
             source = "posix-process"
         return classify_desktop_processes(records, source=source), ()
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError):
-        return (), ("Unable to inspect running Codex desktop processes",)
+        return (), ("无法检查正在运行的 Codex 桌面进程",)
 
 
 def discover_windows_appx_candidates(
@@ -444,7 +444,7 @@ def discover_windows_appx_candidates(
         paths = tuple(Path(value) for value in values if isinstance(value, str) and value)
         return paths, ()
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError, TypeError):
-        return (), ("Unable to inspect the registered Windows Codex application",)
+        return (), ("无法检查 Windows 中已注册的 Codex 应用",)
 
 
 def _discover_implicit_executable(
@@ -461,7 +461,7 @@ def _discover_implicit_executable(
             version = detect_codex_version(path, runner=runner)
         except DiscoveryError:
             warnings.append(
-                f"Skipped a non-runnable Codex candidate from {candidate.source}: {path}"
+                f"已跳过不可运行的 Codex 候选项（来源={candidate.source}）：{path}"
             )
             continue
         return path, version, candidate.source, warnings
@@ -497,7 +497,7 @@ def discover(
     warnings = list(process_warnings)
     if len(processes) > 1:
         warnings.append(
-            f"Detected {len(processes)} Codex desktop backends; using PID {desktop_process.pid}"
+            f"检测到 {len(processes)} 个 Codex 桌面后端；使用 PID {desktop_process.pid}"
         )
 
     desktop_install_paths: tuple[Path, ...] = ()
@@ -509,7 +509,7 @@ def discover(
     if codex_bin:
         executable = _resolved_path(Path(codex_bin))
         if not _is_file(executable):
-            raise DiscoveryError(f"Codex executable does not exist: {executable}")
+            raise DiscoveryError(f"Codex 可执行文件不存在：{executable}")
         version = detect_codex_version(executable, runner=version_runner)
         executable_source = "explicit"
     else:
@@ -561,5 +561,5 @@ def run_codex_json(
             timeout=30,
         )
     except (OSError, subprocess.SubprocessError) as exc:
-        raise DiscoveryError(f"Codex command failed: {exc}") from exc
+        raise DiscoveryError(f"Codex 命令执行失败：{exc}") from exc
     return result.stdout

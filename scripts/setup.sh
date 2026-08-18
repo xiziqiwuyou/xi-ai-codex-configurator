@@ -14,7 +14,7 @@ for candidate in python3 python; do
 done
 
 if [ -z "$PYTHON_BIN" ]; then
-  echo "Python 3.11 or newer is required." >&2
+  echo "需要 Python 3.11 或更高版本。" >&2
   exit 1
 fi
 

@@ -97,8 +97,8 @@ def prompt_token(
     input_fn: Callable[[str], str] = input,
     secret_fn: Callable[[str], str] = read_masked_secret,
 ) -> str:
-    input_fn("Press Enter to enter the Xi-AI API token...")
-    token = secret_fn("Xi-AI API token: ").strip()
+    input_fn("按 Enter 键后输入 Xi-AI API Key（输入时仅显示星号）...")
+    token = secret_fn("Xi-AI API Key：").strip()
     if not token:
-        raise CredentialError("The API token cannot be empty")
+        raise CredentialError("API Key 不能为空")
     return token

@@ -7,7 +7,8 @@ JSON catalog, rollout JSONL, and SQLite state.
 ## 1. Scope / Trigger
 
 - Trigger: the project configures Codex to use the fixed Xi-AI Responses API.
-- In scope: local Codex discovery, one-time hidden token input, model catalog
+- In scope: local Codex discovery, one-time masked token input, Simplified
+  Chinese console messages, model catalog
   merge, managed TOML updates, optional local conversation visibility repair,
   backup, rollback, and restore.
 - Out of scope: uploading or replaying historical prompts, responses,
@@ -116,7 +117,7 @@ The release manifest schema is:
 ```json
 {
   "schema_version": 1,
-  "version": "v0.2.1",
+  "version": "v0.2.2",
   "bundle": {
     "name": "xi-ai-codex-bundle.zip",
     "sha256": "<64 lowercase hex characters>",
@@ -212,8 +213,10 @@ raw response bodies.
 
 - Endpoint tests assert exact `/v1/models` and `/v1/responses` URLs and reject
   `/v1/v1`.
-- Credential tests assert one Enter gate, one hidden prompt, and empty-token
+- Credential tests assert one Enter gate, one masked prompt, and empty-token
   abort behavior.
+- CLI tests assert Chinese preflight, model-selection, dry-run, success, and
+  active-desktop migration guidance without exposing the token.
 - Remote-model tests assert bearer header construction, deduplication,
   malformed-shape rejection, and secret-free errors.
 - Catalog/TOML tests assert bundled retention, remote append, provider-table

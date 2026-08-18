@@ -62,8 +62,8 @@ class CliTests(unittest.TestCase):
             self.assertFalse((home / "config.toml").exists())
             self.assertFalse((home / "xi-ai-model-catalog.json").exists())
             rendered = "\n".join(output)
-            self.assertIn("selected model: remote-b", rendered)
-            self.assertIn("migrate conversations: no", rendered)
+            self.assertIn("默认模型: remote-b", rendered)
+            self.assertIn("迁移现有对话: 否", rendered)
             self.assertNotIn("super-secret", rendered)
 
     def test_detect_only_does_not_prompt_call_api_or_write(self):
@@ -98,7 +98,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertFalse((home / "config.toml").exists())
             self.assertFalse((home / "xi-ai-model-catalog.json").exists())
-            self.assertIn("no token was requested", "\n".join(output))
+            self.assertIn("未请求 API Key", "\n".join(output))
 
     def test_no_migration_keeps_sessions_and_database_byte_for_byte(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -201,8 +201,10 @@ class CliTests(unittest.TestCase):
             self.assertFalse((home / "xi-ai-model-catalog.json").exists())
             rendered = "\n".join(output)
             self.assertIn("PID 77", rendered)
-            self.assertIn("runnable CLI", rendered)
-            self.assertIn("desktop backend", rendered)
+            self.assertIn("可运行 CLI", rendered)
+            self.assertIn("桌面后端", rendered)
+            self.assertIn("选择 Y", rendered)
+            self.assertIn("重新运行并选择 N", rendered)
             self.assertNotIn("placeholder-key", rendered)
 
 

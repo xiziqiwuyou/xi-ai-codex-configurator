@@ -144,7 +144,7 @@ class DiscoveryTests(unittest.TestCase):
 
             self.assertIsNone(result.executable)
             self.assertEqual(result.desktop_process, process)
-            self.assertTrue(any("non-runnable" in item for item in result.warnings))
+            self.assertTrue(any("不可运行" in item for item in result.warnings))
 
     def test_broken_path_candidate_falls_through_to_npm(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -181,7 +181,7 @@ class DiscoveryTests(unittest.TestCase):
 
             self.assertEqual(result.executable, npm.resolve())
             self.assertEqual(result.executable_source, "npm")
-            self.assertTrue(any("non-runnable" in item for item in result.warnings))
+            self.assertTrue(any("不可运行" in item for item in result.warnings))
 
     def test_process_backend_can_be_cli_only_after_version_validation(self):
         with tempfile.TemporaryDirectory() as temp:

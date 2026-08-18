@@ -11,17 +11,17 @@ from .errors import CatalogError, DiscoveryError
 
 def validate_catalog(document: object) -> dict[str, Any]:
     if not isinstance(document, dict) or not isinstance(document.get("models"), list):
-        raise CatalogError("Model catalog must be an object with a models array")
+        raise CatalogError("模型目录必须是包含 models 数组的对象")
     seen: set[str] = set()
     for item in document["models"]:
         if not isinstance(item, dict) or not isinstance(item.get("slug"), str):
-            raise CatalogError("Every catalog model must have a string slug")
+            raise CatalogError("模型目录中的每个模型都必须包含字符串 slug")
         slug = item["slug"]
         if not slug or slug in seen:
-            raise CatalogError("Model catalog contains an empty or duplicate slug")
+            raise CatalogError("模型目录包含空白或重复的 slug")
         seen.add(slug)
     if not seen:
-        raise CatalogError("Model catalog is empty")
+        raise CatalogError("模型目录为空")
     return document
 
 
@@ -39,7 +39,7 @@ def load_bundled_catalog(
     try:
         document = json.loads(fallback_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise CatalogError("Bundled Codex model catalog is unavailable") from exc
+        raise CatalogError("内置 Codex 模型目录不可用") from exc
     return validate_catalog(document)
 
 
@@ -47,7 +47,7 @@ def _generic_remote_entry(model_id: str, template: dict[str, Any], priority: int
     entry = copy.deepcopy(template)
     entry["slug"] = model_id
     entry["display_name"] = model_id
-    entry["description"] = "Remote Xi-AI model; capabilities use a conservative Codex template."
+    entry["description"] = "Xi-AI 远程模型；能力信息使用保守的 Codex 模板。"
     entry["priority"] = priority
     entry["visibility"] = "list"
     entry["supported_in_api"] = True

@@ -30,19 +30,19 @@ def fetch_remote_model_ids(
             payload = response.read()
     except HTTPError as exc:
         if exc.code in {401, 403}:
-            raise RemoteModelError("Xi-AI rejected the API token") from exc
-        raise RemoteModelError(f"Xi-AI model request failed with HTTP {exc.code}") from exc
+            raise RemoteModelError("Xi-AI 拒绝了该 API Key，请检查后重试") from exc
+        raise RemoteModelError(f"请求 Xi-AI 模型列表失败，HTTP {exc.code}") from exc
     except (URLError, OSError) as exc:
-        raise RemoteModelError("Unable to reach the Xi-AI model endpoint") from exc
+        raise RemoteModelError("无法连接 Xi-AI 模型接口") from exc
 
     try:
         document = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RemoteModelError("Xi-AI returned invalid model-list JSON") from exc
+        raise RemoteModelError("Xi-AI 返回的模型列表不是有效 JSON") from exc
 
     data = document.get("data") if isinstance(document, dict) else None
     if not isinstance(data, list):
-        raise RemoteModelError("Xi-AI model response does not contain a data array")
+        raise RemoteModelError("Xi-AI 模型响应中缺少 data 数组")
 
     model_ids: list[str] = []
     seen: set[str] = set()
@@ -56,5 +56,5 @@ def fetch_remote_model_ids(
                 seen.add(normalized)
                 model_ids.append(normalized)
     if not model_ids:
-        raise RemoteModelError("Xi-AI returned no selectable models")
+        raise RemoteModelError("Xi-AI 未返回可选择的模型")
     return model_ids

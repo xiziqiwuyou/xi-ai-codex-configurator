@@ -43,7 +43,7 @@ class BootstrapError(Exception):
 def _require_supported_python(version_info=None) -> None:
     current = sys.version_info if version_info is None else version_info
     if tuple(current[:2]) < (3, 11):
-        raise BootstrapError("Python 3.11 or newer is required")
+        raise BootstrapError("需要 Python 3.11 或更高版本")
 
 
 def _request(url: str) -> Request:
@@ -62,7 +62,7 @@ def _read_limited(response, limit: int) -> bytes:
     if content_length:
         try:
             if int(content_length) > limit:
-                raise BootstrapError("GitHub response exceeds the download size limit")
+                raise BootstrapError("GitHub 响应超过下载大小限制")
         except ValueError:
             pass
     chunks: list[bytes] = []
@@ -73,7 +73,7 @@ def _read_limited(response, limit: int) -> bytes:
             break
         total += len(chunk)
         if total > limit:
-            raise BootstrapError("GitHub response exceeds the download size limit")
+            raise BootstrapError("GitHub 响应超过下载大小限制")
         chunks.append(chunk)
     return b"".join(chunks)
 
@@ -85,22 +85,22 @@ def _open_bytes(url: str, *, opener=urlopen, limit: int) -> bytes:
     except BootstrapError:
         raise
     except HTTPError as exc:
-        raise BootstrapError(f"GitHub request failed with HTTP {exc.code}") from exc
+        raise BootstrapError(f"GitHub 请求失败，HTTP {exc.code}") from exc
     except (URLError, OSError) as exc:
-        raise BootstrapError("Unable to reach GitHub Releases") from exc
+        raise BootstrapError("无法连接 GitHub Releases") from exc
 
 
 def _validate_repository(repository: str) -> str:
     value = repository.strip()
     if not REPOSITORY_RE.fullmatch(value):
-        raise BootstrapError("GitHub repository must use OWNER/REPO format")
+        raise BootstrapError("GitHub 仓库必须使用 OWNER/REPO 格式")
     return value
 
 
 def _validate_version(version: str) -> str:
     value = version.strip()
     if value != "latest" and not TAG_RE.fullmatch(value):
-        raise BootstrapError("GitHub release version contains unsupported characters")
+        raise BootstrapError("GitHub Release 版本包含不支持的字符")
     return value
 
 
@@ -116,7 +116,7 @@ def _release_api_url(repository: str, version: str) -> str:
 def _asset_url(release: dict, name: str) -> str:
     assets = release.get("assets")
     if not isinstance(assets, list):
-        raise BootstrapError("GitHub release does not contain an assets array")
+        raise BootstrapError("GitHub Release 中缺少 assets 数组")
     for asset in assets:
         if not isinstance(asset, dict) or asset.get("name") != name:
             continue
@@ -129,9 +129,9 @@ def _asset_url(release: dict, name: str) -> str:
             "objects.githubusercontent.com",
             "github-releases.githubusercontent.com",
         }:
-            raise BootstrapError(f"GitHub release asset has an invalid URL: {name}")
+            raise BootstrapError(f"GitHub Release 资产 URL 无效：{name}")
         return url
-    raise BootstrapError(f"GitHub release asset is missing: {name}")
+    raise BootstrapError(f"GitHub Release 缺少资产：{name}")
 
 
 def resolve_release(
@@ -143,14 +143,14 @@ def resolve_release(
     try:
         release = json.loads(payload.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BootstrapError("GitHub returned invalid release metadata") from exc
+        raise BootstrapError("GitHub 返回了无效的 Release 元数据") from exc
     if not isinstance(release, dict):
-        raise BootstrapError("GitHub returned invalid release metadata")
+        raise BootstrapError("GitHub 返回了无效的 Release 元数据")
     tag = release.get("tag_name")
     if not isinstance(tag, str) or not TAG_RE.fullmatch(tag):
-        raise BootstrapError("GitHub release has an invalid tag")
+        raise BootstrapError("GitHub Release 标签无效")
     if version != "latest" and tag != version:
-        raise BootstrapError("GitHub release tag does not match the requested version")
+        raise BootstrapError("GitHub Release 标签与请求的版本不一致")
     return tag, _asset_url(release, BUNDLE_NAME), _asset_url(release, CHECKSUM_NAME)
 
 
@@ -167,15 +167,15 @@ def _parse_checksum(path: Path, *, expected_name: str = BUNDLE_NAME) -> str:
             if line.strip()
         ]
     except (OSError, UnicodeDecodeError) as exc:
-        raise BootstrapError("Release checksum file is invalid") from exc
+        raise BootstrapError("Release 校验文件无效") from exc
     if len(lines) != 1:
-        raise BootstrapError("Release checksum file is invalid")
+        raise BootstrapError("Release 校验文件无效")
     fields = lines[0].split(maxsplit=1)
     if len(fields) != 2 or not HASH_RE.fullmatch(fields[0]):
-        raise BootstrapError("Release checksum file is invalid")
+        raise BootstrapError("Release 校验文件无效")
     filename = fields[1].lstrip("*")
     if filename != expected_name:
-        raise BootstrapError("Release checksum does not name the expected bundle")
+        raise BootstrapError("Release 校验文件指向了错误的程序包")
     return fields[0].lower()
 
 
@@ -189,7 +189,7 @@ def _sha256(path: Path) -> str:
 
 def _verify_checksum(path: Path, expected: str) -> None:
     if not hmac.compare_digest(_sha256(path), expected):
-        raise BootstrapError("Downloaded release bundle failed SHA-256 verification")
+        raise BootstrapError("下载的 Release 程序包未通过 SHA-256 校验")
 
 
 def _safe_zip_member(name: str) -> PurePosixPath:
@@ -202,7 +202,7 @@ def _safe_zip_member(name: str) -> PurePosixPath:
         or ".." in member.parts
         or any(":" in part for part in member.parts)
     ):
-        raise BootstrapError("Release bundle contains an unsafe path")
+        raise BootstrapError("Release 程序包包含不安全路径")
     return member
 
 
@@ -210,30 +210,30 @@ def safe_extract(bundle: Path, destination: Path) -> None:
     try:
         archive = zipfile.ZipFile(bundle)
     except (OSError, zipfile.BadZipFile) as exc:
-        raise BootstrapError("Release bundle is not a valid ZIP archive") from exc
+        raise BootstrapError("Release 程序包不是有效的 ZIP 文件") from exc
     with archive:
         members = archive.infolist()
         if len(members) > MAX_ARCHIVE_MEMBERS:
-            raise BootstrapError("Release bundle contains too many files")
+            raise BootstrapError("Release 程序包包含过多文件")
         total = sum(info.file_size for info in members)
         if total > MAX_EXTRACT_BYTES:
-            raise BootstrapError("Release bundle exceeds the extraction size limit")
+            raise BootstrapError("Release 程序包超过解压大小限制")
         root = destination.resolve()
         seen: set[str] = set()
         for info in members:
             member = _safe_zip_member(info.filename)
             member_key = member.as_posix().casefold()
             if member_key in seen:
-                raise BootstrapError("Release bundle contains a duplicate path")
+                raise BootstrapError("Release 程序包包含重复路径")
             seen.add(member_key)
             mode = (info.external_attr >> 16) & 0o170000
             if mode == stat.S_IFLNK:
-                raise BootstrapError("Release bundle contains a symbolic link")
+                raise BootstrapError("Release 程序包包含符号链接")
             target = destination.joinpath(*member.parts)
             try:
                 target.resolve().relative_to(root)
             except ValueError as exc:
-                raise BootstrapError("Release bundle contains an unsafe path") from exc
+                raise BootstrapError("Release 程序包包含不安全路径") from exc
             if info.is_dir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
@@ -246,7 +246,7 @@ def _validate_bundle_root(path: Path) -> None:
     missing = [str(item) for item in REQUIRED_PATHS if not (path / item).is_file()]
     if missing:
         raise BootstrapError(
-            "Release bundle is incomplete; missing: " + ", ".join(missing)
+            "Release 程序包不完整，缺少：" + ", ".join(missing)
         )
 
 
@@ -263,7 +263,7 @@ def _cache_target(cache_root: Path, tag: str) -> Path:
     try:
         target.relative_to(cache_root.resolve())
     except ValueError as exc:
-        raise BootstrapError("Release cache path is invalid") from exc
+        raise BootstrapError("Release 缓存路径无效") from exc
     return target
 
 
@@ -345,24 +345,24 @@ def run_setup(bundle_root: Path, setup_args: list[str], *, runner=subprocess.run
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Download and run a verified Xi-AI Codex GitHub Release."
+        description="下载、校验并运行 Xi-AI Codex GitHub Release。"
     )
     parser.add_argument(
         "--repo",
         default=os.environ.get("GITHUB_REPOSITORY"),
-        help="Public GitHub repository in OWNER/REPO format",
+        help="公开 GitHub 仓库，格式为 OWNER/REPO",
     )
     parser.add_argument(
         "--version",
         default=os.environ.get("XI_AI_CODEX_VERSION"),
-        help="Required release tag to pin; latest must be requested explicitly",
+        help="指定 Release 标签；如需最新版，必须显式传入 latest",
     )
     parser.add_argument("--cache-dir", type=Path, default=_default_cache_root())
     parser.add_argument("--refresh", action="store_true")
     parser.add_argument(
         "--configure",
         action="store_true",
-        help="Run interactive setup; without this flag bootstrap is detect-only",
+        help="运行交互式配置；不传此参数时只执行安全探测",
     )
     return parser
 
@@ -380,10 +380,11 @@ def main(
     try:
         _require_supported_python()
         if not args.repo:
-            raise BootstrapError("Pass --repo OWNER/REPO or set GITHUB_REPOSITORY")
+            raise BootstrapError("请传入 --repo OWNER/REPO 或设置 GITHUB_REPOSITORY")
         if not args.version:
             raise BootstrapError(
-                "Pass --version TAG or set XI_AI_CODEX_VERSION; use latest explicitly if intended"
+                "请传入 --version TAG 或设置 XI_AI_CODEX_VERSION；"
+                "如需最新版，请显式使用 latest"
             )
         repository = _validate_repository(args.repo)
         version = _validate_version(args.version)
@@ -396,17 +397,17 @@ def main(
             opener=opener,
             refresh=args.refresh,
         )
-        print(f"Verified GitHub Release: {repository}@{tag}")
-        print(f"Local bundle: {bundle_root}")
+        print(f"GitHub Release 校验通过：{repository}@{tag}")
+        print(f"本地程序包：{bundle_root}")
         return run_setup(bundle_root, setup_args, runner=runner)
     except BootstrapError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"错误：{exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"Error: local release operation failed ({exc.__class__.__name__})", file=sys.stderr)
+        print(f"错误：本地 Release 操作失败（{exc.__class__.__name__}）", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
-        print("Cancelled.", file=sys.stderr)
+        print("已取消。", file=sys.stderr)
         return 130
 
 

@@ -49,7 +49,7 @@ def collect_rollout_changes(codex_home: Path, target_provider: str) -> list[Roll
                 with path.open("rb") as handle:
                     updated = _update_session_meta(handle.readline(), target_provider)
             except OSError as exc:
-                raise SessionMigrationError(f"Unable to read rollout file: {path}") from exc
+                raise SessionMigrationError(f"无法读取会话记录文件：{path}") from exc
             if updated is not None:
                 changes.append(
                     RolloutChange(
@@ -73,7 +73,7 @@ def sqlite_columns(path: Path) -> set[str]:
         connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)
         return {row[1] for row in connection.execute("PRAGMA table_info(threads)")}
     except sqlite3.Error as exc:
-        raise SessionMigrationError("Unable to inspect Codex session database") from exc
+        raise SessionMigrationError("无法检查 Codex 会话数据库") from exc
     finally:
         if connection is not None:
             try:
@@ -94,7 +94,7 @@ def backup_sqlite(path: Path, destination: Path) -> bool:
     except sqlite3.Error as exc:
         destination.unlink(missing_ok=True)
         raise SessionMigrationError(
-            "Unable to back up state_5.sqlite; close Codex and retry"
+            "无法备份 state_5.sqlite；请完全退出 Codex 后重试"
         ) from exc
     finally:
         if connection is not None:
@@ -111,7 +111,7 @@ def ensure_sqlite_ready(path: Path) -> None:
     sidecars = (Path(f"{path}-wal"), Path(f"{path}-shm"))
     if any(sidecar.exists() for sidecar in sidecars):
         raise SessionMigrationError(
-            "Codex session database is active; close Codex and retry"
+            "Codex 会话数据库正在使用中；请完全退出 Codex 后重试"
         )
     connection: sqlite3.Connection | None = None
     try:
@@ -121,7 +121,7 @@ def ensure_sqlite_ready(path: Path) -> None:
         connection.rollback()
     except sqlite3.Error as exc:
         raise SessionMigrationError(
-            "Codex session database is active; close Codex and retry"
+            "Codex 会话数据库正在使用中；请完全退出 Codex 后重试"
         ) from exc
     finally:
         if connection is not None:
@@ -136,7 +136,7 @@ def update_sqlite_provider(path: Path, target_provider: str) -> int:
         return 0
     columns = sqlite_columns(path)
     if "model_provider" not in columns:
-        raise SessionMigrationError("Codex session database has no model_provider column")
+        raise SessionMigrationError("Codex 会话数据库缺少 model_provider 列")
     assignments = ["model_provider = ?"]
     parameters: list[object] = [target_provider]
     if {"has_user_event", "first_user_message"}.issubset(columns):
@@ -175,7 +175,7 @@ def update_sqlite_provider(path: Path, target_provider: str) -> int:
         except Exception:
             pass
         raise SessionMigrationError(
-            "Unable to update Codex session database; close Codex and retry"
+            "无法更新 Codex 会话数据库；请完全退出 Codex 后重试"
         ) from exc
     finally:
         if connection is not None:
