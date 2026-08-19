@@ -1,0 +1,1 @@
+{"file":".trellis/spec/backend/codex-configurator.md","reason":"现有 bootstrap、发布资产、安全校验、隐私和测试契约；实现时按任务设计将 GitHub 段迁移为 FTPS 发布/HTTPS 下载。"}
