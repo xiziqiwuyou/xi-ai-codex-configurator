@@ -200,3 +200,24 @@ Fixed PowerShell 5.1 native quoting by running the embedded verifier from a BOM-
 ### Status
 
 [OK] **Completed**
+
+
+## Session 10: Publish fixed-entry short command
+
+**Date**: 2026-08-20
+**Task**: Publish fixed-entry short command
+**Branch**: `master`
+
+### Summary
+
+Made irm https://download.xi-ai.net/xi-ai-codex/setup.ps1|iex the default Windows setup command, retained strict checksum mode, published v0.5.5, and verified the public short command reaches the API key prompt without modifying config when input is absent.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `8c4dde0` | (see git log) |
+
+### Status
+
+[OK] **Completed**
