@@ -158,3 +158,24 @@ Implemented v2 compact rollout backups, external backup roots, capacity prefligh
 ### Status
 
 [OK] **Completed**
+
+
+## Session 8: Verified fixed setup entrypoints
+
+**Date**: 2026-08-19
+**Task**: Verified fixed setup entrypoints
+**Branch**: `master`
+
+### Summary
+
+Added stable HTTPS setup.ps1/setup.sh entrypoints, checksum verification, rollback-safe FTPS replacement, portable one-line commands, and full release tests.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `341ee64` | (see git log) |
+
+### Status
+
+[OK] **Completed**

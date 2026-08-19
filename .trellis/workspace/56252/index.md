@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 7
+- **Total Sessions**: 8
 - **Last Active**: 2026-08-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~160 | Active |
+| `journal-1.md` | ~181 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 8 | 2026-08-19 | Verified fixed setup entrypoints | `341ee64` | `master` |
 | 7 | 2026-08-19 | Compact backups and low-space fallback | `e77e103` | `master` |
 | 6 | 2026-08-19 | 迁移 FTPS 发布与 HTTPS 更新源 | `07a67ce`, `c3b5de8`, `ac360e3` | `master` |
 | 5 | 2026-08-19 | Xi-AI endpoint, progress, and context settings | `a1836b5`, `0aa802e`, `f50f7eb` | `master` |
