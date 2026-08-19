@@ -179,3 +179,24 @@ Added stable HTTPS setup.ps1/setup.sh entrypoints, checksum verification, rollba
 ### Status
 
 [OK] **Completed**
+
+
+## Session 9: Windows fixed entry hotfix
+
+**Date**: 2026-08-19
+**Task**: Windows fixed entry hotfix
+**Branch**: `master`
+
+### Summary
+
+Fixed PowerShell 5.1 native quoting by running the embedded verifier from a BOM-free temporary Python file, added a real subprocess regression, published v0.5.4, and verified the public detect-only path without reading a Key or writing Codex files.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `429f497` | (see git log) |
+
+### Status
+
+[OK] **Completed**
