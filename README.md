@@ -91,7 +91,7 @@ Windows PowerShell:
 
 ```powershell
 $base = "https://download.xi-ai.net/xi-ai-codex"
-$v = "v0.5.0"
+$v = "v0.5.1"
 $dir = Join-Path $env:TEMP "xi-ai-codex-bootstrap"
 New-Item -ItemType Directory -Force $dir | Out-Null
 curl.exe --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-release.json" --output (Join-Path $dir "xi-ai-codex-release.json")
@@ -109,7 +109,7 @@ macOS/Linux:
 
 ```sh
 base="https://download.xi-ai.net/xi-ai-codex"
-v="v0.5.0"
+v="v0.5.1"
 dir="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"
 mkdir -p "$dir"
 curl --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-release.json" -o "$dir/xi-ai-codex-release.json"
@@ -127,8 +127,8 @@ conversation metadata are merged on the target computer.
 Pushing a version tag triggers the release workflow. For example:
 
 ```sh
-git tag v0.5.0
-git push origin v0.5.0
+git tag v0.5.1
+git push origin v0.5.1
 ```
 
 The workflow runs the full test suite, packages the five assets above, and uses

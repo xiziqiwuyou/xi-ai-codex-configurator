@@ -1,4 +1,5 @@
 import hashlib
+import ftplib
 import io
 import json
 import stat
@@ -12,7 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import URLError
 
-from scripts import bootstrap, package_release
+from scripts import bootstrap, package_release, publish_release
 
 
 class FakeResponse:
@@ -711,32 +712,242 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertIn("FTPS_PORT: ${{ secrets.FTPS_PORT }}", workflow)
         self.assertIn("FTPS_USERNAME: ${{ secrets.FTPS_USERNAME }}", workflow)
         self.assertIn("FTPS_PASSWORD: ${{ secrets.FTPS_PASSWORD }}", workflow)
-        self.assertIn("LFTP_PASSWORD=\"$FTPS_PASSWORD\"", workflow)
-        self.assertIn("--env-password", workflow)
-        self.assertIn("--user \"$FTPS_USERNAME\"", workflow)
-        self.assertIn("staging_version=", workflow)
-        self.assertIn("cls -d $remote_version", workflow)
-        self.assertIn("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", workflow)
-        self.assertIn("set ftp:ssl-auth TLS", workflow)
-        self.assertIn("set ftp:ssl-protect-list true", workflow)
-        self.assertIn("set ssl:check-hostname yes", workflow)
-        self.assertIn("-H 'Cache-Control: no-cache'", workflow)
-        self.assertIn("cd $remote_root", workflow)
-        self.assertNotIn("mkdir -p $remote_root", workflow)
-        self.assertIn("$staging_name/$asset", workflow)
-        self.assertIn("verify/final-$asset", workflow)
-        self.assertIn("mv $staging_version $remote_version", workflow)
-        self.assertIn("mv $remote_root/$latest_temp $remote_root/latest.json", workflow)
+        self.assertIn("timeout-minutes: 10", workflow)
+        self.assertIn("python scripts/publish_release.py", workflow)
+        self.assertNotIn("apt-get", workflow)
+        self.assertNotIn("lftp", workflow.lower())
         self.assertNotIn("gh release", workflow)
-        self.assertNotIn("rm $remote_root/latest.json", workflow)
-        self.assertLess(
-            workflow.index("$staging_name/$asset"),
-            workflow.index("mv $staging_version $remote_version"),
+
+
+class FakePublishFtp:
+    def __init__(self, *, context, timeout, existing=()):
+        self.context = context
+        self.timeout = timeout
+        self.directories = set(existing)
+        self.files: dict[str, bytes] = {}
+        self.operations: list[tuple] = []
+        self.current = "/"
+
+    @staticmethod
+    def _relative(path: str) -> str:
+        prefix = publish_release.REMOTE_ROOT + "/"
+        return path[len(prefix) :] if path.startswith(prefix) else path
+
+    def connect(self, host, port):
+        self.operations.append(("connect", host, port))
+
+    def login(self, username, password):
+        self.operations.append(("login", username, password))
+
+    def prot_p(self):
+        self.operations.append(("prot_p",))
+
+    def set_pasv(self, value):
+        self.operations.append(("pasv", value))
+
+    def cwd(self, name):
+        if name == publish_release.REMOTE_ROOT:
+            self.current = name
+        elif name in self.directories:
+            self.current = f"{publish_release.REMOTE_ROOT}/{name}"
+        else:
+            raise ftplib.error_perm("550 missing")
+        self.operations.append(("cwd", name))
+
+    def mkd(self, name):
+        if name in self.directories:
+            raise ftplib.error_perm("550 exists")
+        self.directories.add(name)
+        self.operations.append(("mkd", name))
+
+    def storbinary(self, command, source):
+        _, path = command.split(" ", 1)
+        relative = self._relative(path)
+        self.files[relative] = source.read()
+        self.operations.append(("store", relative))
+
+    def rename(self, source, target):
+        source = self._relative(source)
+        target = self._relative(target)
+        if source in self.directories:
+            self.directories.remove(source)
+            self.directories.add(target)
+            for name in tuple(self.files):
+                prefix = source + "/"
+                if name.startswith(prefix):
+                    self.files[target + "/" + name[len(prefix) :]] = self.files.pop(
+                        name
+                    )
+        else:
+            self.files[target] = self.files.pop(source)
+        self.operations.append(("rename", source, target))
+
+    def delete(self, path):
+        relative = self._relative(path)
+        if relative not in self.files:
+            raise ftplib.error_perm("550 missing")
+        del self.files[relative]
+
+    def rmd(self, path):
+        relative = self._relative(path)
+        if relative not in self.directories:
+            raise ftplib.error_perm("550 missing")
+        self.directories.remove(relative)
+
+    def quit(self):
+        self.operations.append(("quit",))
+
+    def close(self):
+        self.operations.append(("close",))
+
+
+class FailingConnectFtp(FakePublishFtp):
+    def connect(self, host, port):
+        self.operations.append(("connect", host, port))
+        raise OSError("connection failed")
+
+
+class PublishReleaseTests(unittest.TestCase):
+    def _assets(self, root: Path) -> None:
+        for index, name in enumerate(publish_release.ASSET_NAMES, start=1):
+            (root / name).write_bytes((name + "\n").encode() * index)
+
+    @staticmethod
+    def _opener(ftp: FakePublishFtp, requests: list[str], failures=None):
+        failures = failures if failures is not None else {}
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+            relative = request.full_url.removeprefix(publish_release.PUBLIC_ROOT + "/")
+            remaining = failures.get(relative, 0)
+            if remaining:
+                failures[relative] = remaining - 1
+                raise URLError("not visible yet")
+            return FakeResponse(
+                ftp.files[relative], final_url=request.full_url
+            )
+
+        return opener
+
+    def test_standard_library_ftps_publisher_is_latest_last(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._assets(root)
+            ftp = FakePublishFtp(context=None, timeout=0)
+            requests: list[str] = []
+            output: list[str] = []
+            failures = {
+                "_staging-v1.0.0-42-1/xi-ai-codex-bundle.zip": 1,
+            }
+
+            publish_release.publish_release(
+                root,
+                "v1.0.0",
+                host=publish_release.PUBLIC_HOST,
+                port=233,
+                username="publisher",
+                password="secret-value",
+                run_id="42",
+                run_attempt="1",
+                ftp_factory=lambda **kwargs: ftp,
+                opener=self._opener(ftp, requests, failures),
+                sleeper=lambda _seconds: None,
+                output=output.append,
+            )
+
+        operations = ftp.operations
+        directory_rename = operations.index(
+            ("rename", "_staging-v1.0.0-42-1", "v1.0.0")
         )
-        self.assertLess(
-            workflow.index("mv $staging_version $remote_version"),
-            workflow.index("put pointer/latest.json"),
+        latest_rename = operations.index(
+            ("rename", "latest.json.tmp-42-1", "latest.json")
         )
+        store_indexes = [
+            index for index, operation in enumerate(operations) if operation[0] == "store"
+        ]
+        self.assertEqual(len(store_indexes), 6)
+        self.assertTrue(all(index < directory_rename for index in store_indexes[:5]))
+        self.assertTrue(store_indexes[-1] > directory_rename)
+        self.assertTrue(store_indexes[-1] < latest_rename)
+        self.assertLess(directory_rename, latest_rename)
+        self.assertEqual(set(failures.values()), {0})
+        self.assertEqual(
+            json.loads(ftp.files["latest.json"]),
+            {"schema_version": 1, "version": "v1.0.0"},
+        )
+        for name in publish_release.ASSET_NAMES:
+            self.assertIn(f"v1.0.0/{name}", ftp.files)
+        self.assertTrue(any("_staging-v1.0.0-42-1" in url for url in requests))
+        self.assertTrue(any("/v1.0.0/" in url for url in requests))
+        self.assertEqual(ftp.operations[0], ("connect", publish_release.PUBLIC_HOST, 233))
+        self.assertIn(("prot_p",), ftp.operations)
+        self.assertIn(("pasv", True), ftp.operations)
+        self.assertNotIn("secret-value", "\n".join(output))
+
+    def test_publisher_rejects_existing_version_before_upload(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._assets(root)
+            ftp = FakePublishFtp(context=None, timeout=0, existing={"v1.0.0"})
+            with self.assertRaises(publish_release.PublishError):
+                publish_release.publish_release(
+                    root,
+                    "v1.0.0",
+                    host=publish_release.PUBLIC_HOST,
+                    port=233,
+                    username="publisher",
+                    password="secret-value",
+                    run_id="42",
+                    run_attempt="1",
+                    ftp_factory=lambda **kwargs: ftp,
+                    opener=lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                        AssertionError("HTTPS must not be called")
+                    ),
+                    sleeper=lambda _seconds: None,
+                )
+        self.assertFalse(any(op[0] == "store" for op in ftp.operations))
+
+    def test_publisher_rejects_unsafe_inputs_and_incomplete_assets(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._assets(root)
+            (root / publish_release.ASSET_NAMES[0]).unlink()
+            with self.assertRaises(publish_release.PublishError):
+                publish_release._release_assets(root)
+        for version in ("latest", "../v1", ""):
+            with self.subTest(version=version), self.assertRaises(
+                publish_release.PublishError
+            ):
+                publish_release._validate_version(version)
+
+    def test_invalid_port_is_secret_free_and_partial_connection_is_closed(self):
+        for value in (0, 65536, True, "233"):
+            with self.subTest(value=value), self.assertRaises(
+                publish_release.PublishError
+            ):
+                publish_release._validate_port(value)
+        with self.assertRaises(publish_release.PublishError) as caught:
+            publish_release._port_from_environment("not-a-port-secret")
+        self.assertNotIn("not-a-port-secret", str(caught.exception))
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._assets(root)
+            ftp = FailingConnectFtp(context=None, timeout=0)
+            with self.assertRaises(publish_release.PublishError):
+                publish_release.publish_release(
+                    root,
+                    "v1.0.0",
+                    host=publish_release.PUBLIC_HOST,
+                    port=233,
+                    username="publisher",
+                    password="secret-value",
+                    run_id="42",
+                    run_attempt="1",
+                    ftp_factory=lambda **kwargs: ftp,
+                    sleeper=lambda _seconds: None,
+                )
+        self.assertIn(("close",), ftp.operations)
 
 
 if __name__ == "__main__":

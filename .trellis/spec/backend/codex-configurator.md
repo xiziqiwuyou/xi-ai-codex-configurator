@@ -188,6 +188,11 @@ Actions uploads over explicit TLS/passive FTPS to a staging directory, verifies
 all five files through their public HTTPS URLs, then atomically renames staging
 to the immutable `/xi-ai-codex/<tag>/` directory. Only after that it uploads a
 temporary `latest.json` and renames it last. Repeating an existing tag fails.
+The workflow calls the repository's Python 3.11 standard-library `FTP_TLS`
+publisher; it must not install `lftp` or depend on `apt-get` during a release.
+The publisher requires the exact public host, validates the tag and five-file
+set, uses the default certificate/hostname checks plus protected passive data,
+and reads credentials only from GitHub Secrets-backed environment variables.
 
 The standalone bootstrap trusts only `https://download.xi-ai.net/xi-ai-codex`.
 `latest` reads the exact `latest.json` pointer, then the matching version
