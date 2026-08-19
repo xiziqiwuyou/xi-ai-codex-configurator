@@ -84,7 +84,7 @@ class RemoteModelTests(unittest.TestCase):
         models = fetch_remote_model_ids("top-secret", opener=opener)
 
         self.assertEqual(models, ["alpha", "beta"])
-        self.assertEqual(captured["url"], "https://api.xi-ai.cn/v1/models")
+        self.assertEqual(captured["url"], "https://api.xi-ai.net/v1/models")
         self.assertEqual(captured["authorization"], "Bearer top-secret")
 
     def test_authentication_error_is_secret_free(self):

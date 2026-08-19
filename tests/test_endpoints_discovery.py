@@ -20,10 +20,10 @@ from codex_configurator.endpoints import API_BASE, MODELS_URL, RESPONSES_URL, ap
 
 class EndpointTests(unittest.TestCase):
     def test_fixed_responses_paths(self):
-        self.assertEqual(API_BASE, "https://api.xi-ai.cn/v1")
-        self.assertEqual(MODELS_URL, "https://api.xi-ai.cn/v1/models")
-        self.assertEqual(RESPONSES_URL, "https://api.xi-ai.cn/v1/responses")
-        self.assertEqual(api_base_from_origin("https://api.xi-ai.cn/v1/"), API_BASE)
+        self.assertEqual(API_BASE, "https://api.xi-ai.net/v1")
+        self.assertEqual(MODELS_URL, "https://api.xi-ai.net/v1/models")
+        self.assertEqual(RESPONSES_URL, "https://api.xi-ai.net/v1/responses")
+        self.assertEqual(api_base_from_origin("https://api.xi-ai.net/v1/"), API_BASE)
         self.assertEqual(resource_url("responses"), RESPONSES_URL)
         self.assertNotIn("/v1/v1", RESPONSES_URL)
 

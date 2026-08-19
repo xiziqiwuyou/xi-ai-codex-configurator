@@ -1,4 +1,4 @@
-ORIGIN = "https://api.xi-ai.cn"
+ORIGIN = "https://api.xi-ai.net"
 API_BASE = f"{ORIGIN}/v1"
 MODELS_URL = f"{API_BASE}/models"
 RESPONSES_URL = f"{API_BASE}/responses"
