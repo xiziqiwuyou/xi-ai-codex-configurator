@@ -65,17 +65,20 @@ always runs `--detect-only`; entering a Key requires an explicit second step.
 Windows PowerShell (paste once, then press Enter):
 
 ```powershell
-$r='xiziqiwuyou/xi-ai-codex-configurator';$d=Join-Path $env:TEMP 'xi-ai-codex-bootstrap';New-Item -ItemType Directory -Force $d|Out-Null;$u="https://github.com/$r/releases/latest/download";$p=Join-Path $d 'xi-ai-codex-bootstrap.py';$s="$p.sha256";curl.exe --progress-bar --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py" --output $p;if($LASTEXITCODE -ne 0){throw '下载 bootstrap 失败'};curl.exe --progress-bar --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py.sha256" --output $s;if($LASTEXITCODE -ne 0){throw '下载校验文件失败'};$e=((Get-Content $s -Raw).Trim() -split '\s+')[0].ToLowerInvariant();$a=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant();if($e -ne $a){throw 'Bootstrap SHA-256 校验失败'};if(Get-Command py -ErrorAction SilentlyContinue){py -3 $p --repo $r --version latest --configure}else{python $p --repo $r --version latest --configure}
+$r='xiziqiwuyou/xi-ai-codex-configurator';$d=Join-Path $env:TEMP 'xi-ai-codex-bootstrap';New-Item -ItemType Directory -Force $d|Out-Null;$h=@{'Accept'='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'};$m=Invoke-RestMethod -Headers $h -Uri "https://api.github.com/repos/$r/releases/latest";$p=Join-Path $d 'xi-ai-codex-bootstrap.py';$s="$p.sha256";function Get-XiAsset($n,$o){$x=$m.assets|Where-Object name -eq $n|Select-Object -First 1;if(-not $x){throw "Release 缺少资产：$n"};curl.exe --progress-bar --fail --location --retry 3 --retry-all-errors --header 'Accept: application/octet-stream' --header 'X-GitHub-Api-Version: 2022-11-28' $x.url --output $o;if($LASTEXITCODE -ne 0){throw "下载失败：$n"}};Get-XiAsset 'xi-ai-codex-bootstrap.py' $p;Get-XiAsset 'xi-ai-codex-bootstrap.py.sha256' $s;$e=((Get-Content $s -Raw).Trim() -split '\s+')[0].ToLowerInvariant();$a=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant();if($e -ne $a){throw 'Bootstrap SHA-256 校验失败'};if(Get-Command py -ErrorAction SilentlyContinue){py -3 $p --repo $r --version $m.tag_name --configure}else{python $p --repo $r --version $m.tag_name --configure}
 ```
 
 macOS/Linux (paste once, then press Enter):
 
 ```sh
-sh -c 'set -eu; r=xiziqiwuyou/xi-ai-codex-configurator; d="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"; mkdir -p "$d"; u="https://github.com/$r/releases/latest/download"; p="$d/xi-ai-codex-bootstrap.py"; curl --progress-bar --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py" -o "$p"; curl --progress-bar --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py.sha256" -o "$p.sha256"; cd "$d"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c xi-ai-codex-bootstrap.py.sha256; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c xi-ai-codex-bootstrap.py.sha256; else echo "No SHA-256 tool found" >&2; exit 1; fi; python3 "$p" --repo "$r" --version latest --configure'
+sh -c 'set -eu; r=xiziqiwuyou/xi-ai-codex-configurator; d="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"; mkdir -p "$d"; m="$d/release.json"; curl --progress-bar --fail --location --retry 3 -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$r/releases/latest" -o "$m"; tag=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding=\"utf-8\"))[\"tag_name\"])" "$m"); asset(){ python3 -c "import json,sys;m=json.load(open(sys.argv[1],encoding=\"utf-8\"));print(next(a[\"url\"] for a in m[\"assets\"] if a[\"name\"]==sys.argv[2]))" "$m" "$1"; }; p="$d/xi-ai-codex-bootstrap.py"; b=$(asset xi-ai-codex-bootstrap.py); c=$(asset xi-ai-codex-bootstrap.py.sha256); curl --progress-bar --fail --location --retry 3 -H "Accept: application/octet-stream" -H "X-GitHub-Api-Version: 2022-11-28" "$b" -o "$p"; curl --progress-bar --fail --location --retry 3 -H "Accept: application/octet-stream" -H "X-GitHub-Api-Version: 2022-11-28" "$c" -o "$p.sha256"; cd "$d"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c xi-ai-codex-bootstrap.py.sha256; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c xi-ai-codex-bootstrap.py.sha256; else echo "No SHA-256 tool found" >&2; exit 1; fi; python3 "$p" --repo "$r" --version "$tag" --configure'
 ```
 
-Both commands save the bootstrap locally and verify SHA-256 before Python runs
-it. They do not pipe downloaded script text directly into a shell.
+Both commands resolve the latest release through `api.github.com`, download
+the bootstrap and checksum through the binary release-asset API, save them
+locally, and verify SHA-256 before Python runs. The resolved tag is pinned for
+the remainder of the setup. They do not pipe downloaded script text directly
+into a shell.
 
 ### Manual pinned-version setup
 
@@ -83,7 +86,7 @@ Windows PowerShell:
 
 ```powershell
 $repo = "OWNER/REPO"
-$tag = "v0.3.1"
+$tag = "v0.4.1"
 $dir = Join-Path $env:TEMP "xi-ai-codex-bootstrap"
 New-Item -ItemType Directory -Force $dir | Out-Null
 Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -OutFile (Join-Path $dir "xi-ai-codex-bootstrap.py")
@@ -99,7 +102,7 @@ macOS/Linux:
 
 ```sh
 repo="OWNER/REPO"
-tag="v0.3.1"
+tag="v0.4.1"
 dir="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"
 mkdir -p "$dir"
 curl --fail --location "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -o "$dir/xi-ai-codex-bootstrap.py"

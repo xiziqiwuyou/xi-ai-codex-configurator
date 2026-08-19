@@ -139,6 +139,56 @@ class BootstrapTests(unittest.TestCase):
 
         self.assertEqual(events[-1].state, "complete")
 
+    def test_release_asset_api_url_is_preferred_and_requested_as_binary(self):
+        bundle_api = (
+            "https://api.github.com/repos/owner/repo/releases/assets/1001"
+        )
+        checksum_api = (
+            "https://api.github.com/repos/owner/repo/releases/assets/1002"
+        )
+        release = {
+            "assets": [
+                {
+                    "name": bootstrap.BUNDLE_NAME,
+                    "url": bundle_api,
+                    "browser_download_url": "https://github.com/fallback/bundle",
+                },
+                {
+                    "name": bootstrap.CHECKSUM_NAME,
+                    "url": checksum_api,
+                    "browser_download_url": "https://github.com/fallback/checksum",
+                },
+            ]
+        }
+
+        self.assertEqual(
+            bootstrap._asset_url(release, bootstrap.BUNDLE_NAME), bundle_api
+        )
+        self.assertEqual(
+            bootstrap._asset_url(release, bootstrap.CHECKSUM_NAME), checksum_api
+        )
+        self.assertEqual(
+            bootstrap._request(bundle_api).get_header("Accept"),
+            "application/octet-stream",
+        )
+        self.assertEqual(
+            bootstrap._request("https://api.github.com/example").get_header("Accept"),
+            "application/vnd.github+json",
+        )
+
+    def test_invalid_release_asset_api_url_is_rejected(self):
+        release = {
+            "assets": [
+                {
+                    "name": bootstrap.BUNDLE_NAME,
+                    "url": "https://example.com/releases/assets/1001",
+                }
+            ]
+        }
+
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap._asset_url(release, bootstrap.BUNDLE_NAME)
+
     def test_short_content_length_response_is_rejected(self):
         response = FakeResponse(b"short")
         response.headers["Content-Length"] = "10"
@@ -500,10 +550,13 @@ class PackageReleaseTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         readme = (root / "README.md").read_text(encoding="utf-8")
 
-        self.assertIn("--version latest --configure", readme)
+        self.assertIn("--version $m.tag_name --configure", readme)
+        self.assertIn("--version \"$tag\" --configure", readme)
         self.assertIn("xi-ai-codex-bootstrap.py.sha256", readme)
         self.assertIn("curl.exe", readme)
         self.assertGreaterEqual(readme.count("--progress-bar"), 4)
+        self.assertIn("https://api.github.com/repos/$r/releases/latest", readme)
+        self.assertIn("application/octet-stream", readme)
         self.assertIn("https://api.xi-ai.net/v1/responses", readme)
         self.assertNotIn("| iex", readme.lower())
         self.assertNotIn("curl | sh", readme.lower())

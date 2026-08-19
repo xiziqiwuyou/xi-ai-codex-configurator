@@ -184,10 +184,14 @@ Public releases use exact asset names `xi-ai-codex-bundle.zip`,
 `xi-ai-codex-bundle.zip.sha256`, `xi-ai-codex-bootstrap.py`,
 `xi-ai-codex-bootstrap.py.sha256`, and `xi-ai-codex-release.json`. The
 standalone bootstrap downloads the GitHub release metadata plus the bundle and
-its checksum, verifies that the checksum names the expected bundle, rejects
-unsafe or colliding ZIP entries, extracts to a versioned cache, and runs the
-local bundle. Transient URL/OS connection failures are retried three times with
-bounded exponential backoff; HTTP and validation errors fail immediately.
+its checksum. It prefers each asset's
+`api.github.com/.../releases/assets/<id>` URL with
+`Accept: application/octet-stream`, validates that API host/path, and uses
+`browser_download_url` only as a compatibility fallback. It verifies that the
+checksum names the expected bundle, rejects unsafe or colliding ZIP entries,
+extracts to a versioned cache, and runs the local bundle. Transient URL/OS
+connection failures are retried three times with bounded exponential backoff;
+HTTP and validation errors fail immediately.
 
 The release manifest schema is:
 
@@ -213,10 +217,11 @@ The repository must be supplied as `--repo OWNER/REPO` or
 tag must be supplied with `--version TAG` or `XI_AI_CODEX_VERSION`; `latest`
 is allowed only when explicitly requested.
 
-README one-line commands hard-code the public repository and explicit
-`latest`, download both bootstrap and checksum to a local temporary directory,
-verify SHA-256, then run the local bootstrap with `--configure`. They must not
-pipe downloaded script text into PowerShell or a POSIX shell.
+README one-line commands hard-code the public repository, resolve `latest`
+through the GitHub API, download both bootstrap and checksum through the binary
+release-asset API, verify SHA-256, then run the local bootstrap with the
+resolved tag and `--configure`. They must not pipe downloaded script text into
+PowerShell or a POSIX shell.
 
 ### Model response and catalog
 
@@ -284,6 +289,7 @@ token. SQLite backups use `VACUUM INTO` before mutation.
 | PID/path/command/root identity changes before force | reject before force or target-file writes |
 | Desktop inspection fails or a backend remains/respawns after close | reject before target-file writes |
 | Release bundle is missing or checksum mismatches | reject before extraction or local execution |
+| Release metadata contains a non-GitHub asset API URL | reject before asset download |
 | Bootstrap has no `--repo` and no `GITHUB_REPOSITORY` | reject before GitHub request |
 | Bootstrap has no `--version` or `XI_AI_CODEX_VERSION` | reject before GitHub request |
 | Bootstrap runs without `--configure` | forward `--detect-only` and never prompt for Key |
@@ -356,7 +362,7 @@ raw response bodies.
 - Bootstrap tests assert GitHub metadata parsing, asset selection, checksum
   failure, transient connection retries, ZIP traversal/symlink rejection,
   cache extraction, setup-argument forwarding, known/unknown-length progress,
-  retry reset, and TTY/non-TTY rendering.
+  retry reset, TTY/non-TTY rendering, and binary GitHub asset API requests.
 - Context tests assert preserve, 500K, 1M, clear, strict integer TOML values,
   supported-model-only prompting, and no context prompt for other models.
 - Session/transaction tests assert progress ordering, throttling, path-free

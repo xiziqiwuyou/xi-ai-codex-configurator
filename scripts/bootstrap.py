@@ -33,6 +33,9 @@ DOWNLOAD_ATTEMPTS = 3
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+ASSET_API_PATH_RE = re.compile(
+    r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/assets/[1-9][0-9]*$"
+)
 REQUIRED_PATHS = (
     Path("src/codex_configurator/__main__.py"),
     Path("assets/bundled-models.json"),
@@ -173,11 +176,27 @@ def _require_supported_python(version_info=None) -> None:
         raise BootstrapError("需要 Python 3.11 或更高版本")
 
 
+def _is_asset_api_url(url: str) -> bool:
+    parsed = urlparse(url)
+    return (
+        parsed.scheme == "https"
+        and parsed.hostname == "api.github.com"
+        and ASSET_API_PATH_RE.fullmatch(parsed.path) is not None
+        and not parsed.query
+        and not parsed.fragment
+    )
+
+
 def _request(url: str) -> Request:
+    accept = (
+        "application/octet-stream"
+        if _is_asset_api_url(url)
+        else "application/vnd.github+json"
+    )
     return Request(
         url,
         headers={
-            "Accept": "application/vnd.github+json",
+            "Accept": accept,
             "User-Agent": "xi-ai-codex-bootstrap",
             "X-GitHub-Api-Version": "2022-11-28",
         },
@@ -336,6 +355,11 @@ def _asset_url(release: dict, name: str) -> str:
     for asset in assets:
         if not isinstance(asset, dict) or asset.get("name") != name:
             continue
+        api_url = asset.get("url")
+        if isinstance(api_url, str):
+            if not _is_asset_api_url(api_url):
+                raise BootstrapError(f"GitHub Release 资产 API URL 无效：{name}")
+            return api_url
         url = asset.get("browser_download_url")
         if not isinstance(url, str):
             break
