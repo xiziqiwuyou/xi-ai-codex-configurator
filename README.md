@@ -64,12 +64,21 @@ the bundle before extracting it into a versioned local cache. Without
 
 ### One-line setup
 
-The command stays the same when a new version is published. It downloads the
-fixed entry to a temporary file; that entry validates `latest.json`, the
-version manifest, the Bootstrap size, and both SHA-256 values before Python
-executes the Bootstrap.
+The fixed entry address stays the same when a new version is published.
 
-Windows PowerShell (paste once, then press Enter):
+Windows PowerShell default (short mode; paste once, then press Enter):
+
+```powershell
+irm https://download.xi-ai.net/xi-ai-codex/setup.ps1|iex
+```
+
+This short mode trusts the fixed HTTPS/TLS entry itself and executes it
+directly. The entry still validates `latest.json`, the version manifest, the
+Bootstrap size, the manifest SHA-256, and the independent Bootstrap checksum;
+the Bootstrap then verifies the release bundle before running configuration.
+
+Windows PowerShell strict checksum mode (verifies the fixed entry before
+execution):
 
 ```powershell
 $b='https://download.xi-ai.net/xi-ai-codex';$p=Join-Path $env:TEMP 'xi-ai-codex-setup.ps1';curl.exe -fsS --proto '=https' --tlsv1.2 --max-redirs 0 --retry 3 "$b/setup.ps1" -o $p;if($LASTEXITCODE){throw '下载失败'};$h=(curl.exe -fsS --proto '=https' --tlsv1.2 --max-redirs 0 --retry 3 "$b/setup.ps1.sha256").Split()[0];if($LASTEXITCODE -or (Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant() -ne $h.ToLowerInvariant()){throw '入口校验失败'};powershell.exe -NoProfile -ExecutionPolicy Bypass -File $p
@@ -81,10 +90,12 @@ macOS/Linux (paste once, then press Enter):
 d=$(mktemp -d);trap 'rm -rf "$d"' EXIT;b=https://download.xi-ai.net/xi-ai-codex;curl -fsS --proto '=https' --tlsv1.2 --max-redirs 0 --retry 3 "$b/setup.sh" -o "$d/setup.sh";curl -fsS --proto '=https' --tlsv1.2 --max-redirs 0 --retry 3 "$b/setup.sh.sha256" -o "$d/setup.sh.sha256";(cd "$d" && if command -v sha256sum >/dev/null 2>&1;then sha256sum -c setup.sh.sha256;else shasum -a 256 -c setup.sh.sha256;fi) && sh "$d/setup.sh"
 ```
 
-Both commands use fixed addresses, verify the downloaded entry checksum, and
-never pipe a network response directly into a shell. Append setup arguments to
-the final `powershell.exe` or `sh` invocation when needed; the fixed entries
-forward options such as `--detect-only` and `--backup-root`.
+The strict Windows and macOS/Linux commands use fixed addresses, verify the
+downloaded entry checksum, and never pipe a network response directly into a
+shell. Append setup arguments to their final `powershell.exe` or `sh`
+invocation when needed; the fixed entries forward options such as
+`--detect-only` and `--backup-root`. The default Windows short command starts
+interactive configuration without additional arguments.
 
 The bootstrap defaults to `--version latest`. Use `--version <tag>` to pin a
 known release, add `--refresh` to rebuild that version's local cache, and omit

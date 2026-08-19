@@ -261,11 +261,16 @@ and executed by file path. It must not be passed as a native `python -c`
 argument because Windows PowerShell can remove quotes inside that argument.
 The bootstrap does not accept or infer a GitHub repository. A release tag may be
 supplied with `--version TAG` or `XI_AI_CODEX_VERSION`; the default is the
-validated `latest.json` pointer. README one-line commands hard-code the public
-HTTPS source, validate the pointer, manifest, bootstrap checksum and size, then
-run the local bootstrap with the resolved tag and `--configure`. They must not
-pipe downloaded script text into PowerShell or a POSIX shell, and must never
-contain FTPS credentials.
+validated `latest.json` pointer. The README must present the exact Windows
+default command `irm https://download.xi-ai.net/xi-ai-codex/setup.ps1|iex`.
+This is the sole remote-pipe exception: short mode trusts the fixed HTTPS/TLS
+entry itself, then the entry validates the pointer, manifest, Bootstrap
+size, manifest SHA-256, and independent checksum before the Bootstrap verifies
+the release bundle. The existing Windows strict checksum mode must download
+and verify `setup.ps1.sha256` before executing the fixed entry. The macOS/Linux
+command remains checksum-first. Strict Windows and all POSIX modes must not
+pipe a network response into a shell, and documentation must never contain
+FTPS credentials or other credential values.
 
 ### Model response and catalog
 
@@ -453,9 +458,10 @@ raw response bodies.
   backup/restore, stable-source rejection, explicit v2 kinds, genuine v1 full
   rollout compatibility, corrupt/duplicate/tail-drift rejection, low-space
   thresholds, and external roots.
-- Documentation tests assert copy-ready one-line commands include checksum
-  verification through the fixed entry, explicit `--configure`, stable setup
-  URLs, and no remote pipe execution.
+- Documentation tests assert the exact Windows default short command and its
+  adjacent HTTPS/TLS trust boundary, retain the Windows strict checksum command
+  and unchanged checksum-first POSIX command, prohibit remote pipe execution in
+  strict/POSIX modes, and reject embedded credentials.
 
 ## 7. Wrong vs Correct
 
@@ -481,11 +487,31 @@ This maps Codex to `https://api.xi-ai.net/v1/responses` exactly once.
 
 ### Wrong
 
+```powershell
+irm http://download.xi-ai.net/xi-ai-codex/setup.ps1|iex
+```
+
+The Windows short-mode exception must not bypass HTTPS/TLS or use any entry
+other than the approved fixed URL.
+
+### Correct
+
+```powershell
+irm https://download.xi-ai.net/xi-ai-codex/setup.ps1|iex
+```
+
+This exact Windows default trusts HTTPS/TLS for the fixed entry itself. The
+entry and Bootstrap still validate the manifest, sizes, SHA-256 checksums, and
+release bundle before configuration runs.
+
+### Wrong
+
 ```sh
 curl https://host/setup.sh | sh
 ```
 
-This executes mutable remote code before release verification.
+POSIX has no remote-pipe exception; this executes mutable remote code before
+release verification.
 
 ### Correct
 

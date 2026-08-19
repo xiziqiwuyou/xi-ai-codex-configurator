@@ -719,7 +719,44 @@ class PackageReleaseTests(unittest.TestCase):
                 manifest["bootstrap"]["name"], package_release.BOOTSTRAP_NAME
             )
 
-    def test_readme_one_line_commands_use_only_verified_https_source(self):
+    def test_readme_documents_windows_short_and_strict_setup_modes(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text(encoding="utf-8")
+        source = "https://download.xi-ai.net/xi-ai-codex"
+        short_command = f"irm {source}/setup.ps1|iex"
+        short_block = f"```powershell\n{short_command}\n```"
+        strict_heading = "Windows PowerShell strict checksum mode"
+        posix_heading = "macOS/Linux (paste once, then press Enter):"
+
+        self.assertIn(short_block, readme)
+        self.assertEqual(readme.count(short_command), 1)
+        self.assertLess(readme.index(short_command), readme.index(strict_heading))
+        self.assertLess(readme.index(strict_heading), readme.index(posix_heading))
+
+        short_section = readme[
+            readme.index(short_command) : readme.index(strict_heading)
+        ]
+        self.assertIn("trusts the fixed HTTPS/TLS entry itself", short_section)
+        self.assertIn("the version manifest", short_section)
+        self.assertIn("the independent Bootstrap checksum", short_section)
+        self.assertIn("verifies the release bundle", short_section)
+
+        strict_section = readme[
+            readme.index(strict_heading) : readme.index(posix_heading)
+        ]
+        self.assertIn("setup.ps1.sha256", strict_section)
+        self.assertIn("Get-FileHash", strict_section)
+        self.assertIn("powershell.exe", strict_section)
+        self.assertNotIn("|iex", strict_section.replace(" ", "").lower())
+
+        posix_end = readme.index("The strict Windows and macOS/Linux commands")
+        posix_section = readme[readme.index(posix_heading) : posix_end]
+        self.assertIn("setup.sh.sha256", posix_section)
+        self.assertIn("sha256sum -c", posix_section)
+        self.assertIn("shasum -a 256 -c", posix_section)
+        self.assertNotIn("curl|sh", posix_section.replace(" ", "").lower())
+
+    def test_readme_release_documentation_is_verified_and_credential_free(self):
         root = Path(__file__).resolve().parents[1]
         readme = (root / "README.md").read_text(encoding="utf-8")
         source = "https://download.xi-ai.net/xi-ai-codex"
@@ -740,9 +777,10 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertIn("https://api.xi-ai.net/v1/responses", readme)
         self.assertNotIn("api.github.com", readme)
         self.assertNotIn("github.com/OWNER/REPO/releases", readme)
+        self.assertNotIn("FTPS_USERNAME", readme)
         self.assertNotIn("FTPS_PASSWORD", readme)
-        self.assertNotIn("| iex", readme.lower())
-        self.assertNotIn("curl | sh", readme.lower())
+        self.assertNotIn("Authorization: Bearer", readme)
+        self.assertNotRegex(readme, r"https://[^/\s:@]+:[^@\s/]+@")
 
     def test_fixed_entries_verify_before_forwarding_setup_arguments(self):
         root = Path(__file__).resolve().parents[1]
