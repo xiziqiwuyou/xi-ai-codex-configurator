@@ -255,7 +255,11 @@ The release manifest schema is:
 The fixed entry scripts resolve and validate `latest.json`, the matching
 manifest, the Bootstrap size, the manifest SHA-256, and the independent
 checksum before invoking Python. They add `--configure` and forward remaining
-arguments. The bootstrap does not accept or infer a GitHub repository. A release tag may be
+arguments. On Windows PowerShell 5.1, the embedded multi-line Python verifier
+must be written as BOM-free UTF-8 to the launcher's random temporary directory
+and executed by file path. It must not be passed as a native `python -c`
+argument because Windows PowerShell can remove quotes inside that argument.
+The bootstrap does not accept or infer a GitHub repository. A release tag may be
 supplied with `--version TAG` or `XI_AI_CODEX_VERSION`; the default is the
 validated `latest.json` pointer. README one-line commands hard-code the public
 HTTPS source, validate the pointer, manifest, bootstrap checksum and size, then
@@ -359,6 +363,7 @@ backup. A failed partial backup is removed.
 | `latest.json` is missing, malformed, or points to an unsafe version | reject before version manifest download |
 | Bootstrap has no `--version` or `XI_AI_CODEX_VERSION` | resolve the fixed HTTPS `latest.json` pointer |
 | Bootstrap runs without `--configure` | forward `--detect-only` and never prompt for Key |
+| Windows fixed entry passes multi-line verifier source through `python -c` | reject in review/tests; execute a BOM-free temporary `.py` file instead |
 
 User-facing errors must not include authorization headers, token values, or
 raw response bodies.
@@ -395,6 +400,11 @@ raw response bodies.
   fresh identity check.
 - Bad: deriving `CODEX_HOME` from `C:\\Program Files\\WindowsApps\\...`; the
   application install directory must never become the config target.
+- Good: Windows PowerShell writes the embedded release verifier into its random
+  temporary directory, runs that `.py` file, forwards `--detect-only`, and
+  removes the directory after the child process exits.
+- Bad: trusting a parser-only PowerShell check for native-process argument
+  behavior; quoting bugs can parse successfully but corrupt the child argv.
 
 ## 6. Tests Required
 
@@ -425,6 +435,9 @@ raw response bodies.
   and malformed manifests before writing.
 - Launcher checks include PowerShell parsing and POSIX `sh -n` when a POSIX
   shell is available.
+- On Windows, a native PowerShell 5.1 subprocess test serves a loopback release,
+  runs the packaged fixed entry, asserts the fake Bootstrap receives
+  `--version <tag> --configure --detect-only`, and asserts temporary cleanup.
 - Discovery tests assert CLI/process separation, candidate fall-through,
   AppX JSON parsing, PPID/root derivation, marker confidence, process filtering,
   and the no-write `--detect-only` mode.
@@ -486,6 +499,29 @@ python3 bootstrap.py --version v1.0.0 --detect-only
 The local checksum is verified before Python executes. The bootstrap then
 verifies the version manifest, its own manifest entry, and the versioned bundle
 checksum; it does not receive a Key in the download command.
+
+### Wrong
+
+```powershell
+& $python -c $multilineVerifier $temporaryDirectory
+```
+
+Windows PowerShell 5.1 can strip quotes while constructing the native process
+command line even though the PowerShell source itself parses successfully.
+
+### Correct
+
+```powershell
+[System.IO.File]::WriteAllText(
+    $verifierPath,
+    $multilineVerifier,
+    [System.Text.UTF8Encoding]::new($false)
+)
+& $python $verifierPath $temporaryDirectory
+```
+
+The child interpreter reads source bytes from a file, so PowerShell only needs
+to pass ordinary filesystem arguments.
 
 ### Wrong
 

@@ -1,9 +1,14 @@
 import hashlib
 import ftplib
+import http.server
 import io
 import json
+import os
 import stat
+import subprocess
+import sys
 import tempfile
+import threading
 import unittest
 import warnings
 import zipfile
@@ -755,7 +760,127 @@ class PackageReleaseTests(unittest.TestCase):
             self.assertNotIn("| iex", source.lower())
             self.assertNotIn("curl | sh", source.lower())
         self.assertIn("--configure @args", powershell)
+        self.assertIn("verify-release.py", powershell)
+        self.assertIn("WriteAllText", powershell)
+        self.assertNotIn("-c $downloader", powershell)
         self.assertIn('--configure "$@"', shell)
+
+    @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell 5.1")
+    def test_packaged_powershell_entry_runs_verifier_file_and_forwards_detect_only(self):
+        version = "v-local-test"
+        bootstrap_source = (
+            "import json, os, sys\n"
+            "from pathlib import Path\n"
+            "Path(os.environ['XI_AI_FIXED_ENTRY_TEST_MARKER']).write_text(\n"
+            "    json.dumps(sys.argv[1:]), encoding='utf-8'\n"
+            ")\n"
+        ).encode("utf-8")
+        bootstrap_hash = hashlib.sha256(bootstrap_source).hexdigest()
+        manifest = {
+            "schema_version": 1,
+            "version": version,
+            "bundle": {
+                "name": "xi-ai-codex-bundle.zip",
+                "sha256": "0" * 64,
+                "size": 1,
+            },
+            "bootstrap": {
+                "name": "xi-ai-codex-bootstrap.py",
+                "sha256": bootstrap_hash,
+                "size": len(bootstrap_source),
+            },
+        }
+        payloads = {
+            "/xi-ai-codex/latest.json": (
+                json.dumps({"schema_version": 1, "version": version}) + "\n"
+            ).encode("utf-8"),
+            f"/xi-ai-codex/{version}/xi-ai-codex-release.json": (
+                json.dumps(manifest) + "\n"
+            ).encode("utf-8"),
+            f"/xi-ai-codex/{version}/xi-ai-codex-bootstrap.py": bootstrap_source,
+            f"/xi-ai-codex/{version}/xi-ai-codex-bootstrap.py.sha256": (
+                f"{bootstrap_hash}  xi-ai-codex-bootstrap.py\n"
+            ).encode("ascii"),
+        }
+
+        class ReleaseHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                payload = payloads.get(self.path)
+                if payload is None:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, _format, *_args):
+                return
+
+        root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as temp:
+            temporary = Path(temp)
+            dist = temporary / "dist"
+            package_release.build_release(root, dist, version)
+            script = dist / "setup.ps1"
+            marker = temporary / "bootstrap-args.json"
+            process_temp = temporary / "process-temp"
+            process_temp.mkdir()
+            server = http.server.ThreadingHTTPServer(
+                ("127.0.0.1", 0), ReleaseHandler
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                local_source = f"http://127.0.0.1:{server.server_port}/xi-ai-codex"
+                source = script.read_text(encoding="utf-8")
+                source = source.replace(
+                    'BASE_URL = "https://download.xi-ai.net/xi-ai-codex"',
+                    f'BASE_URL = "{local_source}"',
+                )
+                script.write_text(source, encoding="utf-8")
+                environment = os.environ.copy()
+                environment["PATH"] = str(Path(sys.executable).parent)
+                environment["TEMP"] = str(process_temp)
+                environment["TMP"] = str(process_temp)
+                environment["XI_AI_FIXED_ENTRY_TEST_MARKER"] = str(marker)
+                powershell = Path(os.environ["SystemRoot"]) / (
+                    "System32/WindowsPowerShell/v1.0/powershell.exe"
+                )
+                result = subprocess.run(
+                    [
+                        str(powershell),
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(script),
+                        "--detect-only",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=environment,
+                    timeout=30,
+                    check=False,
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=5)
+
+            self.assertEqual(
+                result.returncode,
+                0,
+                msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}",
+            )
+            self.assertEqual(
+                json.loads(marker.read_text(encoding="utf-8")),
+                ["--version", version, "--configure", "--detect-only"],
+            )
+            self.assertEqual(list(process_temp.glob("xi-ai-codex-setup-*")), [])
 
     def test_release_workflow_stages_versions_and_replaces_latest_last(self):
         root = Path(__file__).resolve().parents[1]

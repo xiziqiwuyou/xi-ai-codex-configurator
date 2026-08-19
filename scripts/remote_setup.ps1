@@ -239,7 +239,13 @@ $exitCode = 1
 try {
     $python = $selected.Command
     $pythonArguments = @($selected.Prefix)
-    & $python @pythonArguments -c $downloader $temporaryDirectory
+    $downloaderPath = Join-Path $temporaryDirectory "verify-release.py"
+    [System.IO.File]::WriteAllText(
+        $downloaderPath,
+        $downloader,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    & $python @pythonArguments $downloaderPath $temporaryDirectory
     if ($LASTEXITCODE -ne 0) {
         throw "Release verification failed."
     }
