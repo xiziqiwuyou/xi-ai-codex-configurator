@@ -137,3 +137,24 @@ Switched Xi-AI to api.xi-ai.net, added download and local-session migration prog
 ### Status
 
 [OK] **Completed**
+
+
+## Session 7: Compact backups and low-space fallback
+
+**Date**: 2026-08-19
+**Task**: Compact backups and low-space fallback
+**Branch**: `master`
+
+### Summary
+
+Implemented v2 compact rollout backups, external backup roots, capacity preflight and prompting, stable snapshot validation, v1 restore compatibility, documentation, and regression coverage; 123 tests passed.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `e77e103` | (see git log) |
+
+### Status
+
+[OK] **Completed**
