@@ -15,9 +15,17 @@ from .discovery import (
 )
 from .endpoints import PROVIDER_ID
 from .errors import ConfiguratorError
+from .progress import ConsoleProgress
 from .remote_models import fetch_remote_model_ids
 from .sessions import collect_rollout_changes, sqlite_columns, sqlite_path
-from .toml_merge import merge_config
+from .toml_merge import (
+    CLEAR_CONTEXT,
+    CONTEXT_1M,
+    CONTEXT_500K,
+    PRESERVE_CONTEXT,
+    ContextConfig,
+    merge_config,
+)
 from .transaction import SetupChanges, apply_setup, latest_backup, restore_backup
 from .validation import parse_catalog, parse_toml, validate_installed
 
@@ -81,6 +89,57 @@ def _choose_model(model_ids: list[str], *, input_fn=input, output=print) -> str:
         output("请输入有效的模型编号。")
 
 
+LONG_CONTEXT_MODELS = frozenset(
+    {"gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"}
+)
+
+
+def _context_summary(context: ContextConfig) -> str:
+    if context.mode == "preserve":
+        return "保留现有设置"
+    if context.mode == "clear":
+        return "恢复 Codex 默认"
+    assert context.model_context_window is not None
+    assert context.model_auto_compact_token_limit is not None
+    window_label = (
+        "1M"
+        if context.model_context_window == 1_000_000
+        else f"{context.model_context_window // 1000}K"
+    )
+    return (
+        f"{window_label} 上下文"
+        f"（自动压缩阈值 {context.model_auto_compact_token_limit // 1000}K）"
+    )
+
+
+def _choose_context_config(
+    model: str, *, input_fn=input, output=print
+) -> ContextConfig:
+    if model not in LONG_CONTEXT_MODELS:
+        return PRESERVE_CONTEXT
+
+    output(f"模型 {model} 支持手动长上下文配置：")
+    output("  1. 保留现有设置（默认）")
+    output("  2. 500K（窗口 500K，自动压缩阈值 450K）")
+    output("  3. 1M（窗口 1M，自动压缩阈值 900K）")
+    output("  4. 恢复 Codex 默认（删除长上下文配置）")
+    output(
+        "提示：更大的上下文可能增加额度消耗；超过 272K 的计费规则"
+        "以服务方当前说明为准。"
+    )
+    while True:
+        raw = input_fn("请选择上下文配置 [1]：").strip().lower()
+        if raw in {"", "1"}:
+            return PRESERVE_CONTEXT
+        if raw == "2":
+            return CONTEXT_500K
+        if raw == "3":
+            return CONTEXT_1M
+        if raw == "4":
+            return CLEAR_CONTEXT
+        output("请输入 1、2、3 或 4。")
+
+
 def _choose_session_migration(*, input_fn=input) -> bool:
     value = input_fn(
         "是否让现有本地对话在 xi_ai 下可见？选择 Y 将自动关闭 Codex [y/N]："
@@ -138,6 +197,9 @@ def _setup(
     bundled = load_bundled_catalog(result.executable, fallback_path=_fallback_catalog())
     merged = merge_catalog(bundled, remote_ids)
     selected_model = _choose_model(remote_ids, input_fn=input_fn, output=output)
+    context = _choose_context_config(
+        selected_model, input_fn=input_fn, output=output
+    )
     migrate_sessions = _choose_session_migration(input_fn=input_fn)
 
     desktop_was_closed = False
@@ -183,6 +245,7 @@ def _setup(
         model=selected_model,
         catalog_path=catalog_path,
         token=token,
+        context=context,
     )
     config_content = config_text.encode("utf-8")
     catalog_content = catalog_bytes(merged)
@@ -190,15 +253,23 @@ def _setup(
     parse_catalog(catalog_content)
 
     rollout_changes = ()
+    session_progress = ConsoleProgress(output=output) if migrate_sessions else None
     if migrate_sessions:
         database = sqlite_path(result.codex_home)
         columns = sqlite_columns(database)
         if database.is_file() and "model_provider" not in columns:
             raise ConfiguratorError("当前 Codex 会话数据库结构不受支持")
-        rollout_changes = tuple(collect_rollout_changes(result.codex_home, PROVIDER_ID))
+        rollout_changes = tuple(
+            collect_rollout_changes(
+                result.codex_home,
+                PROVIDER_ID,
+                progress=session_progress,
+            )
+        )
 
     output("计划变更：")
     output(f"  默认模型: {selected_model}")
+    output(f"  上下文配置: {_context_summary(context)}")
     output(f"  模型总数: {len(merged['models'])}")
     output(f"  迁移现有对话: {'是' if migrate_sessions else '否'}")
     output(f"  待更新会话文件: {len(rollout_changes)}")
@@ -224,6 +295,7 @@ def _setup(
         result.codex_home,
         changes,
         allow_wal_recovery=migrate_sessions,
+        progress=session_progress,
     )
     validated = validate_installed(result.codex_home)
     output(f"Xi-AI 配置完成，默认模型：{validated['model']}")

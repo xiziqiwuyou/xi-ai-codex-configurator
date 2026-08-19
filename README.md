@@ -4,7 +4,7 @@ This project safely configures Codex CLI, the Codex desktop app, and the Codex
 IDE extension to use Xi-AI through the Responses API.
 
 It detects the local Codex installation, asks once for a machine-specific API
-token, fetches `https://api.xi-ai.cn/v1/models`, merges those remote models with
+token, fetches `https://api.xi-ai.net/v1/models`, merges those remote models with
 the Codex bundled model catalog, lets the user select a default model, and
 optionally makes existing local conversations visible under the `xi_ai`
 provider.
@@ -65,13 +65,13 @@ always runs `--detect-only`; entering a Key requires an explicit second step.
 Windows PowerShell (paste once, then press Enter):
 
 ```powershell
-$r='xiziqiwuyou/xi-ai-codex-configurator';$d=Join-Path $env:TEMP 'xi-ai-codex-bootstrap';New-Item -ItemType Directory -Force $d|Out-Null;$u="https://github.com/$r/releases/latest/download";$p=Join-Path $d 'xi-ai-codex-bootstrap.py';$s="$p.sha256";curl.exe --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py" --output $p;if($LASTEXITCODE -ne 0){throw '下载 bootstrap 失败'};curl.exe --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py.sha256" --output $s;if($LASTEXITCODE -ne 0){throw '下载校验文件失败'};$e=((Get-Content $s -Raw).Trim() -split '\s+')[0].ToLowerInvariant();$a=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant();if($e -ne $a){throw 'Bootstrap SHA-256 校验失败'};if(Get-Command py -ErrorAction SilentlyContinue){py -3 $p --repo $r --version latest --configure}else{python $p --repo $r --version latest --configure}
+$r='xiziqiwuyou/xi-ai-codex-configurator';$d=Join-Path $env:TEMP 'xi-ai-codex-bootstrap';New-Item -ItemType Directory -Force $d|Out-Null;$u="https://github.com/$r/releases/latest/download";$p=Join-Path $d 'xi-ai-codex-bootstrap.py';$s="$p.sha256";curl.exe --progress-bar --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py" --output $p;if($LASTEXITCODE -ne 0){throw '下载 bootstrap 失败'};curl.exe --progress-bar --fail --location --retry 3 --retry-all-errors "$u/xi-ai-codex-bootstrap.py.sha256" --output $s;if($LASTEXITCODE -ne 0){throw '下载校验文件失败'};$e=((Get-Content $s -Raw).Trim() -split '\s+')[0].ToLowerInvariant();$a=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant();if($e -ne $a){throw 'Bootstrap SHA-256 校验失败'};if(Get-Command py -ErrorAction SilentlyContinue){py -3 $p --repo $r --version latest --configure}else{python $p --repo $r --version latest --configure}
 ```
 
 macOS/Linux (paste once, then press Enter):
 
 ```sh
-sh -c 'set -eu; r=xiziqiwuyou/xi-ai-codex-configurator; d="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"; mkdir -p "$d"; u="https://github.com/$r/releases/latest/download"; p="$d/xi-ai-codex-bootstrap.py"; curl --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py" -o "$p"; curl --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py.sha256" -o "$p.sha256"; cd "$d"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c xi-ai-codex-bootstrap.py.sha256; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c xi-ai-codex-bootstrap.py.sha256; else echo "No SHA-256 tool found" >&2; exit 1; fi; python3 "$p" --repo "$r" --version latest --configure'
+sh -c 'set -eu; r=xiziqiwuyou/xi-ai-codex-configurator; d="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"; mkdir -p "$d"; u="https://github.com/$r/releases/latest/download"; p="$d/xi-ai-codex-bootstrap.py"; curl --progress-bar --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py" -o "$p"; curl --progress-bar --fail --location --retry 3 "$u/xi-ai-codex-bootstrap.py.sha256" -o "$p.sha256"; cd "$d"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c xi-ai-codex-bootstrap.py.sha256; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c xi-ai-codex-bootstrap.py.sha256; else echo "No SHA-256 tool found" >&2; exit 1; fi; python3 "$p" --repo "$r" --version latest --configure'
 ```
 
 Both commands save the bootstrap locally and verify SHA-256 before Python runs
@@ -131,11 +131,18 @@ The setup flow is interactive:
 2. Press Enter, then enter the API token using the masked prompt.
 3. The tool fetches the Xi-AI model list.
 4. Select a default model from the numbered menu.
-5. Choose whether existing conversations should be visible under `xi_ai`.
-6. If `Y` is selected, the tool closes the exact detected Codex desktop
+5. If the model is Sol, Terra, or Luna, choose whether to preserve the current
+   context setting, enable 500K, enable 1M, or restore the Codex default.
+   500K writes `model_context_window = 500000` and
+   `model_auto_compact_token_limit = 450000`; 1M writes `1000000` and
+   `900000`. Pressing Enter preserves existing values.
+6. Choose whether existing conversations should be visible under `xi_ai`.
+7. If `Y` is selected, the tool closes the exact detected Codex desktop
    instance. It requests a normal exit for 15 seconds, then revalidates and
    force-stops only that instance if necessary.
-7. The tool creates a complete backup and applies the validated configuration.
+8. The tool shows scan/backup/migration progress, creates a complete backup,
+   and applies the validated configuration. Large batches are throttled so the
+   terminal remains readable.
 
 ## Path Discovery
 
@@ -168,14 +175,26 @@ runnable CLI or configuration home.
 The public service origin is fixed and cannot be overridden:
 
 ```text
-Origin:        https://api.xi-ai.cn
-Provider base: https://api.xi-ai.cn/v1
-Models:       https://api.xi-ai.cn/v1/models
-Responses:    https://api.xi-ai.cn/v1/responses
+Origin:        https://api.xi-ai.net
+Provider base: https://api.xi-ai.net/v1
+Models:       https://api.xi-ai.net/v1/models
+Responses:    https://api.xi-ai.net/v1/responses
 ```
 
 Codex is configured with `wire_api = "responses"`, so the provider base must
 include `/v1` exactly once.
+
+### Progress feedback
+
+The release bootstrap reports Release metadata, checksum, bundle download,
+SHA-256 verification, extraction, and cache installation. A known response
+length shows a percentage; an unknown length shows downloaded bytes. The
+one-line `curl` commands use `--progress-bar` for the initial downloads.
+
+When conversation migration is enabled, the configurator reports session
+scanning, file/database backup, rollout updates, SQLite metadata updates, and
+rollback if needed. These messages contain counts and generic stages only; no
+token, conversation text, or individual session path is printed.
 
 ## Conversation Migration
 
@@ -185,6 +204,12 @@ files and `state_5.sqlite`. Session ids, messages, attachments, project paths,
 source files, and timestamps remain local and are not sent anywhere.
 
 Answering `N` leaves all session files and the session database untouched.
+
+Long-context settings are independent of conversation migration. They are
+written as top-level keys in `~/.codex/config.toml`, take effect after Codex is
+restarted, and should be used with a new task. The configured window is an
+upper bound; actual requests may use less. Cost and eligibility rules for
+500K/1M are controlled by the current service provider.
 
 If a Codex desktop backend is running, answering `Y` authorizes the script to
 close that exact verified desktop instance. It first requests an orderly exit

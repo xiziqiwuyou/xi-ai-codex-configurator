@@ -1,14 +1,20 @@
 import json
 import sqlite3
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_configurator.cli import main
+from codex_configurator.cli import _choose_context_config, main
 from codex_configurator.desktop_control import DesktopCloseResult
 from codex_configurator.discovery import DesktopProcess, DiscoveryResult
 from codex_configurator.errors import DesktopControlError
+from codex_configurator.toml_merge import (
+    CLEAR_CONTEXT,
+    CONTEXT_500K,
+    PRESERVE_CONTEXT,
+)
 from codex_configurator.transaction import apply_setup as apply_setup_transaction
 
 
@@ -68,6 +74,117 @@ class CliTests(unittest.TestCase):
             self.assertIn("默认模型: remote-b", rendered)
             self.assertIn("迁移现有对话: 否", rendered)
             self.assertNotIn("super-secret", rendered)
+
+    def test_long_context_menu_writes_selected_preset(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "3", "n"])
+            output = []
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.fetch_remote_model_ids",
+                return_value=["gpt-5.6-sol"],
+            ):
+                result = main(
+                    ["setup", "--dry-run", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "super-secret",
+                    output=output.append,
+                )
+
+            self.assertEqual(result, 0)
+            rendered = "\n".join(output)
+            self.assertIn("上下文配置: 1M 上下文（自动压缩阈值 900K）", rendered)
+            self.assertNotIn("super-secret", rendered)
+
+    def test_all_supported_models_offer_long_context_and_retry_invalid_choice(self):
+        for model in ("gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"):
+            with self.subTest(model=model):
+                answers = iter(["invalid", "2"])
+                output = []
+                context = _choose_context_config(
+                    model,
+                    input_fn=lambda prompt: next(answers),
+                    output=output.append,
+                )
+                self.assertEqual(context, CONTEXT_500K)
+                self.assertIn("请输入 1、2、3 或 4。", output)
+
+    def test_long_context_menu_defaults_to_preserve_and_supports_clear(self):
+        output = []
+
+        preserved = _choose_context_config(
+            "gpt-5.6-sol",
+            input_fn=lambda prompt: "",
+            output=output.append,
+        )
+        cleared = _choose_context_config(
+            "gpt-5.6-sol",
+            input_fn=lambda prompt: "4",
+            output=output.append,
+        )
+
+        self.assertEqual(preserved, PRESERVE_CONTEXT)
+        self.assertEqual(cleared, CLEAR_CONTEXT)
+        self.assertTrue(any("272K" in line for line in output))
+
+    def test_long_context_preset_is_written_by_normal_setup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "2", "n"])
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.fetch_remote_model_ids",
+                return_value=["gpt-5.6-luna"],
+            ):
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "super-secret",
+                    output=lambda value: None,
+                )
+
+            self.assertEqual(result, 0)
+            config = tomllib.loads((home / "config.toml").read_text(encoding="utf-8"))
+            self.assertEqual(config["model_context_window"], 500_000)
+            self.assertEqual(config["model_auto_compact_token_limit"], 450_000)
+
+    def test_non_long_context_model_does_not_prompt_for_context(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "n"])
+            output = []
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.fetch_remote_model_ids",
+                return_value=["remote-model"],
+            ):
+                result = main(
+                    ["setup", "--dry-run", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "super-secret",
+                    output=output.append,
+                )
+
+            self.assertEqual(result, 0)
+            rendered = "\n".join(output)
+            self.assertIn("上下文配置: 保留现有设置", rendered)
+            self.assertNotIn("支持手动长上下文配置", rendered)
 
     def test_detect_only_does_not_prompt_call_api_or_write(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -152,6 +269,7 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             for path, content in before.items():
                 self.assertEqual(path.read_bytes(), content)
+            self.assertNotIn("扫描本地会话", "\n".join(output))
 
     def test_migration_requires_detected_codex_without_writing(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -232,6 +350,9 @@ class CliTests(unittest.TestCase):
             self.assertIn("PID 77", rendered)
             self.assertIn("正在关闭", rendered)
             self.assertIn("已正常退出", rendered)
+            self.assertIn("[扫描本地会话] 完成", rendered)
+            self.assertIn("[备份会话数据库] 完成", rendered)
+            self.assertIn("[更新会话数据库] 完成", rendered)
             self.assertNotIn("placeholder-key", rendered)
 
     def test_migration_without_initial_desktop_runs_two_fresh_checks(self):

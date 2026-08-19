@@ -54,8 +54,16 @@ configuration directory.
 Core storage signatures are:
 
 ```python
-def merge_config(existing: str, *, model: str, catalog_path: Path, token: str) -> str
+def merge_config(
+    existing: str,
+    *,
+    model: str,
+    catalog_path: Path,
+    token: str,
+    context: ContextConfig = PRESERVE_CONTEXT,
+) -> str
 def fetch_remote_model_ids(token: str, *, url: str = MODELS_URL, opener=urlopen) -> list[str]
+def collect_rollout_changes(codex_home: Path, target_provider: str, *, progress=None) -> list[RolloutChange]
 def update_sqlite_provider(path: Path, target_provider: str) -> int
 def ensure_sqlite_ready(path: Path, *, allow_wal_recovery: bool = False) -> None
 def apply_setup(
@@ -64,6 +72,7 @@ def apply_setup(
     *,
     fail_at: str | None = None,
     allow_wal_recovery: bool = False,
+    progress=None,
 ) -> Path
 def restore_backup(codex_home: Path, backup_dir: Path) -> None
 ```
@@ -73,10 +82,10 @@ def restore_backup(codex_home: Path, backup_dir: Path) -> None
 ### Endpoint and provider
 
 ```text
-ORIGIN        = https://api.xi-ai.cn
-API_BASE      = https://api.xi-ai.cn/v1
-MODELS_URL    = https://api.xi-ai.cn/v1/models
-RESPONSES_URL = https://api.xi-ai.cn/v1/responses
+ORIGIN        = https://api.xi-ai.net
+API_BASE      = https://api.xi-ai.net/v1
+MODELS_URL    = https://api.xi-ai.net/v1/models
+RESPONSES_URL = https://api.xi-ai.net/v1/responses
 PROVIDER_ID   = xi_ai
 ```
 
@@ -84,13 +93,12 @@ The generated provider is:
 
 ```toml
 model_provider = "xi_ai"
-preferred_auth_method = "apikey"
 forced_login_method = "api"
 model_catalog_json = "<CODEX_HOME>/xi-ai-model-catalog.json"
 
 [model_providers.xi_ai]
 name = "Xi-AI"
-base_url = "https://api.xi-ai.cn/v1"
+base_url = "https://api.xi-ai.net/v1"
 wire_api = "responses"
 experimental_bearer_token = "<local token>"
 ```
@@ -99,6 +107,37 @@ The token is accepted only from one masked prompt. Each received character is
 echoed as `*`; backspace removes the last mask character. The token itself is
 never echoed, read from an environment variable, or accepted as a command-line
 argument.
+
+`preferred_auth_method` is a legacy managed key: setup removes an existing
+root assignment but does not write it back because Codex CLI `0.144.1` rejects
+it under `app-server --strict-config`. API-key authentication is carried by the
+provider's local `experimental_bearer_token`; `forced_login_method = "api"`
+remains a supported root setting.
+
+For `gpt-5.6-sol`, `gpt-5.6-terra`, and `gpt-5.6-luna`, setup may manage two
+optional top-level Codex settings. The default action preserves existing
+values; the explicit presets are:
+
+```toml
+# 500K preset
+model_context_window = 500000
+model_auto_compact_token_limit = 450000
+
+# 1M preset
+model_context_window = 1000000
+model_auto_compact_token_limit = 900000
+```
+
+“Restore Codex default” removes both keys. Other model slugs do not prompt for
+these settings and preserve them. The configurator does not change reasoning
+effort. Context and billing eligibility are provider-controlled; the tool does
+not claim that a token is entitled to either preset.
+
+Progress callbacks are observational only. They may report stage, state
+(`start`, `update`, `complete`), current count, and total count, but must never
+contain tokens, authorization headers, response bodies, conversation text, or
+individual session paths. The `N` migration branch must not create or invoke a
+session progress producer.
 
 `setup --detect-only` prints discovery information and returns without reading
 the token, calling Xi-AI, or writing configuration, catalog, rollout, SQLite,
@@ -265,7 +304,7 @@ raw response bodies.
   and validates it, then `VACUUM INTO` preserves committed WAL content.
 - Bad: `N` opens SQLite to inspect or rewrite it; this violates the strict
   no-session-write branch.
-- Bad: using `https://api.xi-ai.cn` as `base_url` or appending `/v1` twice;
+- Bad: using `https://api.xi-ai.net` without `/v1` as `base_url` or appending `/v1` twice;
   this breaks the Responses route.
 - Bad: restoring from a manifest with `../` or a backup-root target; reject it
   before any target replacement.
@@ -316,7 +355,12 @@ raw response bodies.
   and the no-write `--detect-only` mode.
 - Bootstrap tests assert GitHub metadata parsing, asset selection, checksum
   failure, transient connection retries, ZIP traversal/symlink rejection,
-  cache extraction, and setup-argument forwarding.
+  cache extraction, setup-argument forwarding, known/unknown-length progress,
+  retry reset, and TTY/non-TTY rendering.
+- Context tests assert preserve, 500K, 1M, clear, strict integer TOML values,
+  supported-model-only prompting, and no context prompt for other models.
+- Session/transaction tests assert progress ordering, throttling, path-free
+  output, rollback reporting, and no progress events on the `N` branch.
 - Documentation tests assert copy-ready one-line commands include checksum
   verification, explicit `latest --configure`, and no remote pipe execution.
 
@@ -326,7 +370,7 @@ raw response bodies.
 
 ```toml
 [model_providers.xi_ai]
-base_url = "https://api.xi-ai.cn"
+base_url = "https://api.xi-ai.net"
 wire_api = "responses"
 ```
 
@@ -336,11 +380,11 @@ This makes Codex resolve the wrong resource path.
 
 ```toml
 [model_providers.xi_ai]
-base_url = "https://api.xi-ai.cn/v1"
+base_url = "https://api.xi-ai.net/v1"
 wire_api = "responses"
 ```
 
-This maps Codex to `https://api.xi-ai.cn/v1/responses` exactly once.
+This maps Codex to `https://api.xi-ai.net/v1/responses` exactly once.
 
 ### Wrong
 
