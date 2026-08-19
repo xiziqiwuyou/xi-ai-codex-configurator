@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from codex_configurator.errors import SessionMigrationError, TransactionError
+from codex_configurator.progress import ConsoleProgress, ProgressEvent
 from codex_configurator.sessions import (
     backup_sqlite,
     collect_rollout_changes,
@@ -68,6 +69,54 @@ def create_retained_wal_database(path: Path) -> None:
 
 
 class SessionTests(unittest.TestCase):
+    def test_rollout_scan_progress_is_determinate_and_path_free(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            for index, root_name in enumerate(("sessions", "archived_sessions")):
+                rollout = home / root_name / f"rollout-{index}.jsonl"
+                rollout.parent.mkdir(parents=True)
+                rollout.write_text(
+                    '{"type":"session_meta","payload":{"model_provider":"openai"}}\n',
+                    encoding="utf-8",
+                )
+            events = []
+
+            changes = collect_rollout_changes(home, "xi_ai", progress=events.append)
+
+            self.assertEqual(len(changes), 2)
+            self.assertEqual(events[0].state, "start")
+            self.assertEqual(events[-1].state, "complete")
+            self.assertEqual(events[-1].current, 2)
+            self.assertEqual(events[-1].total, 2)
+            rendered = " ".join(event.label for event in events)
+            self.assertNotIn("rollout-", rendered)
+            self.assertNotIn(str(home), rendered)
+
+    def test_non_tty_progress_is_throttled_and_has_no_control_characters(self):
+        output = []
+        reporter = ConsoleProgress(output=output.append, tty=False, percent_step=10)
+        for current in range(101):
+            reporter(
+                ProgressEvent(
+                    "bulk", "批量处理", "update", current=current, total=100
+                )
+            )
+
+        self.assertLessEqual(len(output), 11)
+        self.assertTrue(all("\r" not in line and "\x1b" not in line for line in output))
+
+    def test_tty_progress_uses_in_place_updates(self):
+        import io
+
+        stream = io.StringIO()
+        reporter = ConsoleProgress(stream=stream, tty=True)
+        reporter(ProgressEvent("scan", "扫描", "update", current=1, total=2))
+        reporter(ProgressEvent("scan", "扫描", "complete", current=2, total=2))
+        rendered = stream.getvalue()
+        self.assertIn("\r", rendered)
+        self.assertIn("#", rendered)
+        self.assertTrue(rendered.endswith("\n"))
+
     def test_rollout_change_only_updates_session_provider(self):
         with tempfile.TemporaryDirectory() as temp:
             home = Path(temp)
@@ -232,6 +281,30 @@ class TransactionTests(unittest.TestCase):
                 ).fetchone()[0]
                 connection.close()
                 self.assertEqual(provider, "openai")
+
+    def test_transaction_progress_reports_order_and_rollback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            changes, _ = self._make_changes(home)
+            events = []
+
+            with self.assertRaises(TransactionError):
+                apply_setup(home, changes, fail_at="catalog", progress=events.append)
+
+            phases = [(event.phase, event.state) for event in events]
+            self.assertLess(
+                phases.index(("backup_files", "start")),
+                phases.index(("write_config", "start")),
+            )
+            self.assertLess(
+                phases.index(("write_config", "complete")),
+                phases.index(("write_catalog", "start")),
+            )
+            self.assertIn(("rollback", "start"), phases)
+            self.assertIn(("rollback", "complete"), phases)
+            rendered = " ".join(event.label for event in events)
+            self.assertNotIn(str(home), rendered)
+            self.assertNotIn("session_meta", rendered)
 
     def test_failed_backup_is_cleaned_up(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .endpoints import PROVIDER_ID
 from .errors import TransactionError
+from .progress import ProgressCallback, emit_progress
 from .sessions import (
     RolloutChange,
     backup_sqlite,
@@ -95,20 +96,57 @@ def _backup_file(path: Path, codex_home: Path, backup_dir: Path) -> dict:
     return entry
 
 
-def create_backup(codex_home: Path, changes: SetupChanges) -> Path:
+def create_backup(
+    codex_home: Path,
+    changes: SetupChanges,
+    *,
+    progress: ProgressCallback | None = None,
+) -> Path:
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
     backup_dir = codex_home / "backup-xi-ai" / stamp
     backup_dir.mkdir(parents=True, exist_ok=False)
     try:
         targets: list[Path] = [changes.config_path, changes.catalog_path]
         targets.extend(change.path for change in changes.rollout_changes)
-        file_entries = [_backup_file(path, codex_home, backup_dir) for path in targets]
+        emit_progress(
+            progress,
+            "backup_files",
+            "备份配置和会话文件",
+            "start",
+            current=0,
+            total=len(targets),
+        )
+        file_entries = []
+        for index, path in enumerate(targets, start=1):
+            file_entries.append(_backup_file(path, codex_home, backup_dir))
+            emit_progress(
+                progress,
+                "backup_files",
+                "备份配置和会话文件",
+                "update",
+                current=index,
+                total=len(targets),
+            )
+        emit_progress(
+            progress,
+            "backup_files",
+            "备份配置和会话文件",
+            "complete",
+            current=len(targets),
+            total=len(targets),
+        )
 
         database = sqlite_path(codex_home)
         sqlite_entry = {"path": "state_5.sqlite", "existed": False}
         if changes.migrate_sessions and database.is_file():
             snapshot = backup_dir / "db" / "state_5.sqlite"
+            emit_progress(
+                progress, "backup_sqlite", "备份会话数据库", "start"
+            )
             backup_sqlite(database, snapshot)
+            emit_progress(
+                progress, "backup_sqlite", "备份会话数据库", "complete"
+            )
             sqlite_entry = {
                 "path": "state_5.sqlite",
                 "existed": True,
@@ -282,35 +320,81 @@ def apply_setup(
     *,
     fail_at: str | None = None,
     allow_wal_recovery: bool = False,
+    progress: ProgressCallback | None = None,
 ) -> Path:
     codex_home.mkdir(parents=True, exist_ok=True)
+    emit_progress(progress, "setup", "应用配置", "start")
     if changes.migrate_sessions:
+        emit_progress(
+            progress, "sqlite_ready", "检查会话数据库", "start"
+        )
         ensure_sqlite_ready(
             sqlite_path(codex_home),
             allow_wal_recovery=allow_wal_recovery,
         )
-    backup_dir = create_backup(codex_home, changes)
+        emit_progress(
+            progress, "sqlite_ready", "检查会话数据库", "complete"
+        )
+    backup_dir = create_backup(codex_home, changes, progress=progress)
     try:
+        emit_progress(progress, "write_config", "写入 Codex 配置", "start")
         atomic_write(changes.config_path, changes.config_content)
+        emit_progress(progress, "write_config", "写入 Codex 配置", "complete")
         if fail_at == "config":
             raise RuntimeError("injected failure after config")
+        emit_progress(progress, "write_catalog", "写入模型目录", "start")
         atomic_write(changes.catalog_path, changes.catalog_content)
+        emit_progress(progress, "write_catalog", "写入模型目录", "complete")
         if fail_at == "catalog":
             raise RuntimeError("injected failure after catalog")
-        for change in changes.rollout_changes:
+        rollout_total = len(changes.rollout_changes)
+        emit_progress(
+            progress,
+            "rewrite_rollouts",
+            "更新会话索引",
+            "start",
+            current=0,
+            total=rollout_total,
+        )
+        for index, change in enumerate(changes.rollout_changes, start=1):
             atomic_rewrite_rollout(change)
+            emit_progress(
+                progress,
+                "rewrite_rollouts",
+                "更新会话索引",
+                "update",
+                current=index,
+                total=rollout_total,
+            )
+        emit_progress(
+            progress,
+            "rewrite_rollouts",
+            "更新会话索引",
+            "complete",
+            current=rollout_total,
+            total=rollout_total,
+        )
         if fail_at == "rollouts":
             raise RuntimeError("injected failure after rollouts")
         if changes.migrate_sessions:
+            emit_progress(
+                progress, "update_sqlite", "更新会话数据库", "start"
+            )
             update_sqlite_provider(sqlite_path(codex_home), PROVIDER_ID)
+            emit_progress(
+                progress, "update_sqlite", "更新会话数据库", "complete"
+            )
         if fail_at == "sqlite":
             raise RuntimeError("injected failure after sqlite")
     except Exception as exc:
+        emit_progress(progress, "rollback", "自动恢复原配置", "start")
         try:
             restore_backup(codex_home, backup_dir)
+            emit_progress(progress, "rollback", "自动恢复原配置", "complete")
         except Exception as restore_exc:
             raise TransactionError(
                 f"配置失败，自动恢复也失败：{restore_exc}"
             ) from exc
         raise TransactionError(f"配置失败，已自动回滚：{exc}") from exc
+    emit_progress(progress, "setup", "应用配置", "complete")
     return backup_dir

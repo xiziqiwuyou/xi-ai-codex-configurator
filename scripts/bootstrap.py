@@ -14,7 +14,10 @@ import sys
 import tempfile
 import time
 import zipfile
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Literal, TextIO
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
@@ -42,6 +45,128 @@ class BootstrapError(Exception):
     pass
 
 
+DownloadState = Literal["start", "update", "complete", "retry"]
+
+
+@dataclass(frozen=True)
+class DownloadProgress:
+    stage: str
+    state: DownloadState
+    current: int | None = None
+    total: int | None = None
+    attempt: int = 1
+
+    @property
+    def bytes_downloaded(self) -> int | None:
+        return self.current
+
+    @property
+    def total_bytes(self) -> int | None:
+        return self.total
+
+    @property
+    def status(self) -> DownloadState:
+        return self.state
+
+
+DownloadProgressCallback = Callable[[DownloadProgress], None]
+
+
+class BootstrapProgress:
+    def __init__(
+        self,
+        *,
+        stream: TextIO | None = None,
+        tty: bool | None = None,
+        percent_step: int = 10,
+    ) -> None:
+        self.stream = stream if stream is not None else sys.stdout
+        self.tty = self.stream.isatty() if tty is None else tty
+        self.percent_step = max(1, min(percent_step, 100))
+        self._last_bucket: dict[str, int] = {}
+        self._last_unknown: dict[str, int] = {}
+        self._line_width = 0
+
+    @staticmethod
+    def _format_bytes(value: int) -> str:
+        if value < 1024 * 1024:
+            return f"{value / 1024:.1f} KiB"
+        return f"{value / (1024 * 1024):.1f} MiB"
+
+    def _should_emit(self, event: DownloadProgress) -> bool:
+        if event.state != "update":
+            return True
+        if event.current is None:
+            return False
+        if event.total is not None and event.total > 0:
+            bucket = int(event.current * 100 / event.total) // self.percent_step
+            if self._last_bucket.get(event.stage) == bucket:
+                return False
+            self._last_bucket[event.stage] = bucket
+            return True
+        previous = self._last_unknown.get(event.stage, -1_048_576)
+        if event.current - previous < 1_048_576:
+            return False
+        self._last_unknown[event.stage] = event.current
+        return True
+
+    def __call__(self, event: DownloadProgress) -> None:
+        if event.state in {"start", "retry"}:
+            self._last_bucket.pop(event.stage, None)
+            self._last_unknown.pop(event.stage, None)
+        if not self.tty and not self._should_emit(event):
+            return
+        if event.state == "start":
+            rendered = f"[{event.stage}] 开始（第 {event.attempt} 次）"
+        elif event.state == "retry":
+            rendered = f"[{event.stage}] 网络波动，准备第 {event.attempt} 次重试"
+        elif event.state == "complete":
+            rendered = f"[{event.stage}] 完成"
+            if event.current is not None:
+                rendered += f"（{self._format_bytes(event.current)}）"
+        elif event.total is not None and event.total > 0:
+            assert event.current is not None
+            percent = min(100, int(event.current * 100 / event.total))
+            filled = min(20, int(percent * 20 / 100))
+            bar = "#" * filled + "-" * (20 - filled)
+            rendered = (
+                f"[{event.stage}] [{bar}] {percent:3d}% "
+                f"{self._format_bytes(event.current)}/{self._format_bytes(event.total)}"
+            )
+        else:
+            assert event.current is not None
+            rendered = f"[{event.stage}] 已下载 {self._format_bytes(event.current)}"
+
+        if self.tty:
+            padding = " " * max(0, self._line_width - len(rendered))
+            self.stream.write(f"\r{rendered}{padding}")
+            self.stream.flush()
+            self._line_width = len(rendered)
+            if event.state == "complete":
+                self.stream.write("\n")
+                self.stream.flush()
+                self._line_width = 0
+        else:
+            self.stream.write(rendered + "\n")
+            self.stream.flush()
+        if event.state == "complete":
+            self._last_bucket.pop(event.stage, None)
+            self._last_unknown.pop(event.stage, None)
+
+
+def _emit_progress(
+    callback: DownloadProgressCallback | None,
+    event: DownloadProgress,
+) -> None:
+    if callback is None:
+        return
+    try:
+        callback(event)
+    except Exception:
+        # Download progress is observational and cannot change verification behavior.
+        pass
+
+
 def _require_supported_python(version_info=None) -> None:
     current = sys.version_info if version_info is None else version_info
     if tuple(current[:2]) < (3, 11):
@@ -59,7 +184,15 @@ def _request(url: str) -> Request:
     )
 
 
-def _read_limited(response, limit: int) -> bytes:
+def _read_limited(
+    response,
+    limit: int,
+    *,
+    progress: DownloadProgressCallback | None = None,
+    stage: str = "下载",
+    attempt: int = 1,
+    announce_start: bool = True,
+) -> bytes:
     content_length = response.headers.get("Content-Length")
     if content_length:
         try:
@@ -67,6 +200,28 @@ def _read_limited(response, limit: int) -> bytes:
                 raise BootstrapError("GitHub 响应超过下载大小限制")
         except ValueError:
             pass
+    total_size: int | None = None
+    if content_length:
+        try:
+            parsed_length = int(content_length)
+            if parsed_length >= 0:
+                total_size = parsed_length
+        except ValueError:
+            pass
+    if announce_start:
+        _emit_progress(
+            progress,
+            DownloadProgress(
+                stage, "start", current=0, total=total_size, attempt=attempt
+            ),
+        )
+    elif total_size is not None:
+        _emit_progress(
+            progress,
+            DownloadProgress(
+                stage, "update", current=0, total=total_size, attempt=attempt
+            ),
+        )
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -77,15 +232,60 @@ def _read_limited(response, limit: int) -> bytes:
         if total > limit:
             raise BootstrapError("GitHub 响应超过下载大小限制")
         chunks.append(chunk)
+        _emit_progress(
+            progress,
+            DownloadProgress(
+                stage,
+                "update",
+                current=total,
+                total=total_size,
+                attempt=attempt,
+            ),
+        )
+    if total_size is not None and total != total_size:
+        raise BootstrapError("GitHub 响应长度与 Content-Length 不一致")
+    _emit_progress(
+        progress,
+        DownloadProgress(
+            stage,
+            "complete",
+            current=total,
+            total=total_size,
+            attempt=attempt,
+        ),
+    )
     return b"".join(chunks)
 
 
-def _open_bytes(url: str, *, opener=urlopen, limit: int) -> bytes:
+def _open_bytes(
+    url: str,
+    *,
+    opener=urlopen,
+    limit: int,
+    progress: DownloadProgressCallback | None = None,
+    stage: str = "下载",
+) -> bytes:
     last_error: URLError | OSError | None = None
     for attempt in range(DOWNLOAD_ATTEMPTS):
         try:
+            _emit_progress(
+                progress,
+                DownloadProgress(
+                    stage,
+                    "start",
+                    current=0,
+                    attempt=attempt + 1,
+                ),
+            )
             with opener(_request(url), timeout=30) as response:
-                return _read_limited(response, limit)
+                return _read_limited(
+                    response,
+                    limit,
+                    progress=progress,
+                    stage=stage,
+                    attempt=attempt + 1,
+                    announce_start=False,
+                )
         except BootstrapError:
             raise
         except HTTPError as exc:
@@ -93,6 +293,15 @@ def _open_bytes(url: str, *, opener=urlopen, limit: int) -> bytes:
         except (URLError, OSError) as exc:
             last_error = exc
             if attempt + 1 < DOWNLOAD_ATTEMPTS:
+                _emit_progress(
+                    progress,
+                    DownloadProgress(
+                        stage,
+                        "retry",
+                        current=0,
+                        attempt=attempt + 2,
+                    ),
+                )
                 time.sleep(0.5 * (2**attempt))
     raise BootstrapError("多次重试后仍无法连接 GitHub Releases") from last_error
 
@@ -142,10 +351,18 @@ def _asset_url(release: dict, name: str) -> str:
 
 
 def resolve_release(
-    repository: str, version: str, *, opener=urlopen
+    repository: str,
+    version: str,
+    *,
+    opener=urlopen,
+    progress: DownloadProgressCallback | None = None,
 ) -> tuple[str, str, str]:
     payload = _open_bytes(
-        _release_api_url(repository, version), opener=opener, limit=MAX_API_BYTES
+        _release_api_url(repository, version),
+        opener=opener,
+        limit=MAX_API_BYTES,
+        progress=progress,
+        stage="Release 元数据",
     )
     try:
         release = json.loads(payload.decode("utf-8"))
@@ -161,8 +378,22 @@ def resolve_release(
     return tag, _asset_url(release, BUNDLE_NAME), _asset_url(release, CHECKSUM_NAME)
 
 
-def _download(url: str, destination: Path, *, opener=urlopen, limit: int) -> None:
-    content = _open_bytes(url, opener=opener, limit=limit)
+def _download(
+    url: str,
+    destination: Path,
+    *,
+    opener=urlopen,
+    limit: int,
+    progress: DownloadProgressCallback | None = None,
+    stage: str = "下载",
+) -> None:
+    content = _open_bytes(
+        url,
+        opener=opener,
+        limit=limit,
+        progress=progress,
+        stage=stage,
+    )
     destination.write_bytes(content)
 
 
@@ -292,9 +523,10 @@ def install_release(
     *,
     opener=urlopen,
     refresh: bool = False,
+    progress: DownloadProgressCallback | None = None,
 ) -> tuple[str, Path]:
     tag, bundle_url, checksum_url = resolve_release(
-        repository, version, opener=opener
+        repository, version, opener=opener, progress=progress
     )
     cache_root = cache_root.expanduser().resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
@@ -303,29 +535,53 @@ def install_release(
     with tempfile.TemporaryDirectory(prefix="xi-ai-codex-download-") as temp:
         temporary = Path(temp)
         checksum_path = temporary / CHECKSUM_NAME
-        _download(checksum_url, checksum_path, opener=opener, limit=1024 * 1024)
+        _download(
+            checksum_url,
+            checksum_path,
+            opener=opener,
+            limit=1024 * 1024,
+            progress=progress,
+            stage="下载 Release 校验文件",
+        )
         expected_hash = _parse_checksum(checksum_path)
         if not refresh and target.is_dir() and _cached_bundle_is_valid(
             target, expected_hash
         ):
+            _emit_progress(
+                progress,
+                DownloadProgress("已验证缓存，跳过程序包下载", "complete"),
+            )
             return tag, target
 
         bundle_path = temporary / BUNDLE_NAME
-        _download(bundle_url, bundle_path, opener=opener, limit=MAX_DOWNLOAD_BYTES)
+        _download(
+            bundle_url,
+            bundle_path,
+            opener=opener,
+            limit=MAX_DOWNLOAD_BYTES,
+            progress=progress,
+            stage="下载 Release 程序包",
+        )
+        _emit_progress(progress, DownloadProgress("校验 SHA-256", "start"))
         _verify_checksum(bundle_path, expected_hash)
+        _emit_progress(progress, DownloadProgress("校验 SHA-256", "complete"))
 
         stage = Path(tempfile.mkdtemp(prefix=f".{tag}-", dir=cache_root))
         try:
+            _emit_progress(progress, DownloadProgress("解压程序包", "start"))
             safe_extract(bundle_path, stage)
             _validate_bundle_root(stage)
+            _emit_progress(progress, DownloadProgress("解压程序包", "complete"))
             (stage / ".release-sha256").write_text(
                 expected_hash + "\n", encoding="ascii"
             )
+            _emit_progress(progress, DownloadProgress("安装本地缓存", "start"))
             if target.is_symlink() or target.is_file():
                 target.unlink()
             elif target.is_dir():
                 shutil.rmtree(target)
             os.replace(stage, target)
+            _emit_progress(progress, DownloadProgress("安装本地缓存", "complete"))
         finally:
             if stage.exists():
                 shutil.rmtree(stage, ignore_errors=True)
@@ -379,6 +635,7 @@ def main(
     *,
     opener=urlopen,
     runner=subprocess.run,
+    progress: DownloadProgressCallback | None = None,
 ) -> int:
     parser = build_parser()
     args, setup_args = parser.parse_known_args(argv)
@@ -397,12 +654,14 @@ def main(
         version = _validate_version(args.version)
         if not args.configure and "--detect-only" not in setup_args:
             setup_args.insert(0, "--detect-only")
+        progress_callback = progress if progress is not None else BootstrapProgress()
         tag, bundle_root = install_release(
             repository,
             version,
             args.cache_dir,
             opener=opener,
             refresh=args.refresh,
+            progress=progress_callback,
         )
         print(f"GitHub Release 校验通过：{repository}@{tag}")
         print(f"本地程序包：{bundle_root}")

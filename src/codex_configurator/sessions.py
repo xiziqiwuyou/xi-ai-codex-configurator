@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .errors import SessionMigrationError
+from .progress import ProgressCallback, emit_progress
 
 
 @dataclass(frozen=True)
@@ -28,36 +29,68 @@ def _update_session_meta(line: bytes, target_provider: str) -> bytes | None:
         document = json.loads(raw.decode("utf-8-sig"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if document.get("type") != "session_meta" or not isinstance(document.get("payload"), dict):
+    if document.get("type") != "session_meta" or not isinstance(
+        document.get("payload"), dict
+    ):
         return None
     payload = document["payload"]
     if payload.get("model_provider") == target_provider:
         return None
     payload["model_provider"] = target_provider
-    encoded = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    encoded = json.dumps(
+        document, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
     return encoded + newline
 
 
-def collect_rollout_changes(codex_home: Path, target_provider: str) -> list[RolloutChange]:
+def collect_rollout_changes(
+    codex_home: Path,
+    target_provider: str,
+    *,
+    progress: ProgressCallback | None = None,
+) -> list[RolloutChange]:
     changes: list[RolloutChange] = []
     roots = [codex_home / "sessions", codex_home / "archived_sessions"]
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for path in root.rglob("*.jsonl"):
-            try:
-                with path.open("rb") as handle:
-                    updated = _update_session_meta(handle.readline(), target_provider)
-            except OSError as exc:
-                raise SessionMigrationError(f"无法读取会话记录文件：{path}") from exc
-            if updated is not None:
-                changes.append(
-                    RolloutChange(
-                        path=path,
-                        updated_first_line=updated,
-                        mtime_ns=path.stat().st_mtime_ns,
-                    )
+    emit_progress(
+        progress, "session_scan", "扫描本地会话", "start", current=0
+    )
+    paths = sorted(
+        path for root in roots if root.is_dir() for path in root.rglob("*.jsonl")
+    )
+    total = len(paths)
+    emit_progress(
+        progress, "session_scan", "扫描本地会话", "update", current=0, total=total
+    )
+    for index, path in enumerate(paths, start=1):
+        try:
+            with path.open("rb") as handle:
+                updated = _update_session_meta(handle.readline(), target_provider)
+        except OSError as exc:
+            raise SessionMigrationError(f"无法读取会话记录文件：{path}") from exc
+        if updated is not None:
+            changes.append(
+                RolloutChange(
+                    path=path,
+                    updated_first_line=updated,
+                    mtime_ns=path.stat().st_mtime_ns,
                 )
+            )
+        emit_progress(
+            progress,
+            "session_scan",
+            "扫描本地会话",
+            "update",
+            current=index,
+            total=total,
+        )
+    emit_progress(
+        progress,
+        "session_scan",
+        "扫描本地会话",
+        "complete",
+        current=total,
+        total=total,
+    )
     return changes
 
 
@@ -164,20 +197,25 @@ def update_sqlite_provider(path: Path, target_provider: str) -> int:
     parameters: list[object] = [target_provider]
     if {"has_user_event", "first_user_message"}.issubset(columns):
         assignments.append(
-            "has_user_event = CASE WHEN COALESCE(TRIM(first_user_message), '') <> '' THEN 1 ELSE has_user_event END"
+            "has_user_event = CASE WHEN COALESCE(TRIM(first_user_message), '') "
+            "<> '' THEN 1 ELSE has_user_event END"
         )
     if {"thread_source", "first_user_message"}.issubset(columns):
         assignments.append(
-            "thread_source = CASE WHEN COALESCE(thread_source, '') = '' AND COALESCE(first_user_message, '') <> '' THEN 'user' ELSE thread_source END"
+            "thread_source = CASE WHEN COALESCE(thread_source, '') = '' "
+            "AND COALESCE(first_user_message, '') <> '' THEN 'user' "
+            "ELSE thread_source END"
         )
     predicates = ["COALESCE(model_provider, '') <> ?"]
     if {"has_user_event", "first_user_message"}.issubset(columns):
         predicates.append(
-            "(COALESCE(first_user_message, '') <> '' AND COALESCE(has_user_event, 0) <> 1)"
+            "(COALESCE(first_user_message, '') <> '' AND "
+            "COALESCE(has_user_event, 0) <> 1)"
         )
     if {"thread_source", "first_user_message"}.issubset(columns):
         predicates.append(
-            "(COALESCE(first_user_message, '') <> '' AND COALESCE(thread_source, '') = '')"
+            "(COALESCE(first_user_message, '') <> '' AND "
+            "COALESCE(thread_source, '') = '')"
         )
     connection: sqlite3.Connection | None = None
     try:

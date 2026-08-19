@@ -16,9 +16,11 @@ from scripts import bootstrap, package_release
 
 
 class FakeResponse:
-    def __init__(self, payload: bytes):
+    def __init__(self, payload: bytes, *, content_length: bool = True):
         self._stream = io.BytesIO(payload)
-        self.headers = {"Content-Length": str(len(payload))}
+        self.headers = (
+            {"Content-Length": str(len(payload))} if content_length else {}
+        )
 
     def __enter__(self):
         return self
@@ -41,6 +43,210 @@ def release_bundle() -> bytes:
 
 
 class BootstrapTests(unittest.TestCase):
+    def test_known_length_progress_is_monotonic_and_completes_at_100_percent(self):
+        payload = b"x" * (2 * 1024 * 1024 + 7)
+        events = []
+
+        result = bootstrap._read_limited(
+            FakeResponse(payload),
+            len(payload) + 1,
+            progress=events.append,
+            stage="程序包",
+        )
+
+        updates = [event for event in events if event.state == "update"]
+        self.assertEqual(result, payload)
+        self.assertEqual(events[0].state, "start")
+        self.assertEqual(events[-1].state, "complete")
+        self.assertEqual(events[-1].current, len(payload))
+        self.assertEqual(events[-1].total, len(payload))
+        self.assertEqual(
+            [event.current for event in updates],
+            sorted(event.current for event in updates),
+        )
+
+        output = io.StringIO()
+        reporter = bootstrap.BootstrapProgress(stream=output, tty=False)
+        for event in events:
+            reporter(event)
+        self.assertIn("100%", output.getvalue())
+        self.assertNotIn("\r", output.getvalue())
+
+    def test_unknown_length_progress_reports_bytes_without_percentage(self):
+        events = []
+        payload = b"x" * 2048
+
+        bootstrap._read_limited(
+            FakeResponse(payload, content_length=False),
+            4096,
+            progress=events.append,
+            stage="未知长度",
+        )
+
+        self.assertTrue(all(event.total is None for event in events))
+        output = io.StringIO()
+        reporter = bootstrap.BootstrapProgress(stream=output, tty=False)
+        for event in events:
+            reporter(event)
+        rendered = output.getvalue()
+        self.assertIn("已下载", rendered)
+        self.assertNotIn("%", rendered)
+
+    def test_retry_progress_resets_the_next_attempt(self):
+        events = []
+        attempts = []
+
+        def opener(request, timeout):
+            attempts.append(request.full_url)
+            if len(attempts) == 1:
+                raise URLError("temporary reset")
+            return FakeResponse(b"ok")
+
+        with patch.object(bootstrap.time, "sleep"):
+            bootstrap._open_bytes(
+                "https://api.github.com/example",
+                opener=opener,
+                limit=1024,
+                progress=events.append,
+                stage="重试下载",
+            )
+
+        retry = next(event for event in events if event.state == "retry")
+        second_start = next(
+            event
+            for event in events
+            if event.state == "start" and event.attempt == 2
+        )
+        self.assertEqual(retry.current, 0)
+        self.assertEqual(retry.attempt, 2)
+        self.assertEqual(second_start.current, 0)
+
+    def test_progress_starts_before_the_network_opener(self):
+        events = []
+
+        def opener(request, timeout):
+            self.assertEqual(events[-1].state, "start")
+            self.assertEqual(events[-1].current, 0)
+            return FakeResponse(b"ok")
+
+        bootstrap._open_bytes(
+            "https://api.github.com/example",
+            opener=opener,
+            limit=1024,
+            progress=events.append,
+            stage="连接 GitHub",
+        )
+
+        self.assertEqual(events[-1].state, "complete")
+
+    def test_short_content_length_response_is_rejected(self):
+        response = FakeResponse(b"short")
+        response.headers["Content-Length"] = "10"
+        with self.assertRaises(bootstrap.BootstrapError):
+            bootstrap._read_limited(response, 1024)
+
+    def test_tty_progress_uses_in_place_updates_and_finishes_with_newline(self):
+        output = io.StringIO()
+        reporter = bootstrap.BootstrapProgress(stream=output, tty=True)
+        reporter(
+            bootstrap.DownloadProgress(
+                "程序包", "update", current=50, total=100
+            )
+        )
+        reporter(
+            bootstrap.DownloadProgress(
+                "程序包", "complete", current=100, total=100
+            )
+        )
+        rendered = output.getvalue()
+        self.assertIn("\r", rendered)
+        self.assertIn("#", rendered)
+        self.assertTrue(rendered.endswith("\n"))
+
+    def test_retry_renderer_does_not_keep_previous_percentage_bucket(self):
+        output = io.StringIO()
+        reporter = bootstrap.BootstrapProgress(
+            stream=output, tty=False, percent_step=10
+        )
+        reporter(
+            bootstrap.DownloadProgress(
+                "程序包", "update", current=90, total=100, attempt=1
+            )
+        )
+        reporter(
+            bootstrap.DownloadProgress(
+                "程序包", "retry", current=0, total=100, attempt=2
+            )
+        )
+        reporter(
+            bootstrap.DownloadProgress(
+                "程序包", "start", current=0, total=100, attempt=2
+            )
+        )
+        reporter(
+            bootstrap.DownloadProgress(
+                "程序包", "update", current=10, total=100, attempt=2
+            )
+        )
+        self.assertIn(" 10%", output.getvalue())
+
+    def test_validated_cache_reports_skip_without_redownloading_bundle(self):
+        bundle = release_bundle()
+        checksum = hashlib.sha256(bundle).hexdigest()
+        release_url = "https://api.github.com/repos/owner/repo/releases/tags/v1"
+        bundle_url = (
+            "https://github.com/owner/repo/releases/download/v1/"
+            "xi-ai-codex-bundle.zip"
+        )
+        checksum_url = bundle_url + ".sha256"
+        release = json.dumps(
+            {
+                "tag_name": "v1",
+                "assets": [
+                    {
+                        "name": bootstrap.BUNDLE_NAME,
+                        "browser_download_url": bundle_url,
+                    },
+                    {
+                        "name": bootstrap.CHECKSUM_NAME,
+                        "browser_download_url": checksum_url,
+                    },
+                ],
+            }
+        ).encode()
+        payloads = {
+            release_url: release,
+            bundle_url: bundle,
+            checksum_url: f"{checksum}  {bootstrap.BUNDLE_NAME}\n".encode(),
+        }
+        requests = []
+
+        def opener(request, timeout):
+            requests.append(request.full_url)
+            return FakeResponse(payloads[request.full_url])
+
+        with tempfile.TemporaryDirectory() as temp:
+            bootstrap.install_release("owner/repo", "v1", Path(temp), opener=opener)
+            requests.clear()
+            events = []
+
+            bootstrap.install_release(
+                "owner/repo",
+                "v1",
+                Path(temp),
+                opener=opener,
+                progress=events.append,
+            )
+
+        self.assertNotIn(bundle_url, requests)
+        self.assertTrue(
+            any(
+                event.stage == "已验证缓存，跳过程序包下载"
+                and event.state == "complete"
+                for event in events
+            )
+        )
+
     def test_unsupported_python_stops_before_github_request(self):
         with redirect_stderr(io.StringIO()):
             with patch.object(bootstrap.sys, "version_info", (3, 10, 9)):
@@ -190,7 +396,9 @@ class BootstrapTests(unittest.TestCase):
             called = True
             return SimpleNamespace(returncode=0)
 
-        with tempfile.TemporaryDirectory() as temp, redirect_stderr(io.StringIO()):
+        with tempfile.TemporaryDirectory() as temp, redirect_stderr(
+            io.StringIO()
+        ), redirect_stdout(io.StringIO()):
             result = bootstrap.main(
                 ["--repo", "owner/repo", "--version", "v1", "--cache-dir", temp],
                 opener=lambda request, timeout: FakeResponse(
@@ -295,6 +503,8 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertIn("--version latest --configure", readme)
         self.assertIn("xi-ai-codex-bootstrap.py.sha256", readme)
         self.assertIn("curl.exe", readme)
+        self.assertGreaterEqual(readme.count("--progress-bar"), 4)
+        self.assertIn("https://api.xi-ai.net/v1/responses", readme)
         self.assertNotIn("| iex", readme.lower())
         self.assertNotIn("curl | sh", readme.lower())
 
