@@ -31,9 +31,10 @@ def main(
 ) -> int
 ```
 
-Supported commands are `setup [--dry-run] [--detect-only]`, `status`,
-`validate`, and `restore [--backup PATH]`. All commands accept `--codex-home`
-and `--codex-bin`; only a normal `setup` reads interactive input.
+Supported commands are `setup [--dry-run] [--detect-only] [--backup-root PATH]`,
+`status`, `validate`, and `restore [--backup PATH] [--backup-root PATH]`. All
+commands accept `--codex-home` and `--codex-bin`; only a normal `setup` reads
+interactive input.
 
 Discovery signatures are:
 
@@ -64,6 +65,17 @@ def merge_config(
 ) -> str
 def fetch_remote_model_ids(token: str, *, url: str = MODELS_URL, opener=urlopen) -> list[str]
 def collect_rollout_changes(codex_home: Path, target_provider: str, *, progress=None) -> list[RolloutChange]
+@dataclass(frozen=True)
+class BackupSpaceEstimate:
+    backup_bytes: int
+    local_temp_bytes: int
+
+def check_backup_space(
+    codex_home: Path,
+    changes: SetupChanges,
+    backup_root: Path | None = None,
+) -> BackupSpaceEstimate
+def estimate_backup_space(codex_home: Path, changes: SetupChanges) -> BackupSpaceEstimate
 def update_sqlite_provider(path: Path, target_provider: str) -> int
 def ensure_sqlite_ready(path: Path, *, allow_wal_recovery: bool = False) -> None
 def apply_setup(
@@ -72,9 +84,15 @@ def apply_setup(
     *,
     fail_at: str | None = None,
     allow_wal_recovery: bool = False,
+    backup_root: Path | None = None,
     progress=None,
 ) -> Path
-def restore_backup(codex_home: Path, backup_dir: Path) -> None
+def restore_backup(
+    codex_home: Path,
+    backup_dir: Path,
+    *,
+    backup_root: Path | None = None,
+) -> None
 ```
 
 ## 3. Contracts
@@ -267,10 +285,34 @@ from its main database because committed pages may exist only in the WAL.
 
 ### Backup and restore
 
-Backups live under `<CODEX_HOME>/backup-xi-ai/<timestamp>/`. The manifest
-contains provider, Codex home, relative target paths, existence flags, SHA-256
-hashes, timestamps, and the session-migration flag. It never contains the API
-token. SQLite backups use `VACUUM INTO` before mutation.
+By default backups live under `<CODEX_HOME>/backup-xi-ai/<timestamp>/`; an
+explicit `--backup-root` may place them on another volume. New manifests use
+format version 2. Config and catalog files are full backups, SQLite uses
+`VACUUM INTO`, and changed rollout files use a patch containing only the
+original first line plus file-size, tail-size, tail-hash, patch-hash, and
+timestamp metadata. This avoids duplicating historical conversation content.
+Every version 2 file entry must explicitly declare `kind = "full"` or
+`kind = "rollout_first_line"`; a missing or unknown kind is malformed and
+must be rejected before any restore write. Version 1 entries always retain
+legacy full-file semantics even if an untrusted manifest adds a `kind` field.
+Restore accepts an external root only when the caller explicitly supplies
+`backup_root` (the CLI infers the parent for an explicitly named
+`--backup PATH`). All target and source paths remain constrained and all
+hashes are validated before the first write.
+
+Full config/catalog files are copied and hashed in one stable source snapshot.
+A compact rollout tail is read and hashed once, with file identity, size,
+mtime, and first-line checks before and after patch creation. If any source
+changes during backup, the partial backup directory is removed and setup stops
+before configuration, catalog, rollout, or SQLite mutation.
+
+Before backup creation, the transaction estimates full-file, patch, SQLite,
+manifest, and atomic-write temporary space and checks the nearest existing
+destination volume. The check is repeated immediately before copying. If the
+default volume is insufficient, setup lists suitable mounted volumes when
+possible and asks for a custom path; blank input aborts. A custom path that is
+unwritable or too small aborts. Space errors never cause setup to skip the
+backup. A failed partial backup is removed.
 
 ## 4. Validation & Error Matrix
 
@@ -286,9 +328,11 @@ token. SQLite backups use `VACUUM INTO` before mutation.
 | Existing SQLite WAL/SHM without explicit process-verified recovery authorization | reject and preserve sidecars |
 | Authorized retained WAL with successful RESTART checkpoint, quick check and write lock | continue to `VACUUM INTO` backup |
 | RESTART checkpoint is busy, quick check fails, or write lock cannot be acquired | reject before target business-data writes |
-| Any mutation phase fails | restore all affected files and SQLite snapshot |
-| Restore path is outside `backup-xi-ai` | reject before writing |
-| Restore manifest has invalid paths, hashes, schema, or duplicate targets | reject before writing |
+| Backup volume is too small or unavailable | reject before configuration/session/database writes; offer explicit alternate root |
+| Config/catalog/rollout source changes while backup is being built | delete the partial backup and reject before target mutation |
+| Any mutation phase fails | restore all affected files and SQLite snapshot/compact patches |
+| Restore path is outside the selected backup root | reject before writing |
+| v2 file entry omits `kind`, or manifest has invalid paths, hashes, schema, or duplicate targets | reject before writing |
 | Configured model is absent from the active catalog | `validate` fails |
 | `setup --detect-only` is selected | no prompt, network call, or target write |
 | Desktop `app-server` is active and user selects `Y` | close exact verified instance, rediscover, then migrate in the same run |
@@ -313,15 +357,18 @@ raw response bodies.
 - Base: no existing config, sessions, or SQLite database; setup writes only
   `config.toml`, the generated catalog, and a manifest.
 - Good: `Y` changes provider metadata in local rollout/SQLite records while
-  preserving all message content and timestamps.
+  preserving all message content and timestamps; the v2 backup stores only
+  each original rollout first line.
 - Good: Codex is absent but a valid WAL/SHM pair remains; SQLite checkpoints
   and validates it, then `VACUUM INTO` preserves committed WAL content.
 - Bad: `N` opens SQLite to inspect or rewrite it; this violates the strict
   no-session-write branch.
 - Bad: using `https://api.xi-ai.net` without `/v1` as `base_url` or appending `/v1` twice;
   this breaks the Responses route.
-- Bad: restoring from a manifest with `../` or a backup-root target; reject it
-  before any target replacement.
+- Bad: restoring from a manifest with `../`, a duplicate target, a mismatched
+  compact tail hash, or a backup-root target; reject it before any replacement.
+- Bad: treating a v2 compact patch with a missing `kind` as a full backup; this
+  can truncate a rollout to its original first line. Reject the manifest.
 - Good: the npm CLI is runnable while the Store `app-server` is active; report
   both paths and use the npm CLI for version/model commands.
 - Good: the Store `app-server` has a same-install-tree `ChatGPT.exe` parent;
@@ -375,7 +422,10 @@ raw response bodies.
 - Context tests assert preserve, 500K, 1M, clear, strict integer TOML values,
   supported-model-only prompting, and no context prompt for other models.
 - Session/transaction tests assert progress ordering, throttling, path-free
-  output, rollback reporting, and no progress events on the `N` branch.
+  output, rollback reporting, no progress events on the `N` branch, compact
+  backup/restore, stable-source rejection, explicit v2 kinds, genuine v1 full
+  rollout compatibility, corrupt/duplicate/tail-drift rejection, low-space
+  thresholds, and external roots.
 - Documentation tests assert copy-ready one-line commands include checksum
   verification, explicit `latest --configure`, and no remote pipe execution.
 
@@ -473,3 +523,21 @@ home = resolve_codex_home_details(explicit, env=env, home=Path.home())[0]
 
 The configuration home follows the explicit/environment/default contract and
 is validated independently from executable discovery.
+
+### Wrong
+
+```python
+apply_setup(home, changes, backup_root=home / "D-drive")
+```
+
+Treating a directory inside `CODEX_HOME` as an alternate volume can consume
+the same failing disk and makes backup selection misleading.
+
+### Correct
+
+```powershell
+python -m codex_configurator setup --backup-root D:\Xi-AI-Backups
+```
+
+The transaction checks the selected volume before any target mutation and
+keeps the backup root explicit for later restore.

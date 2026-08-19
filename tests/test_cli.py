@@ -9,7 +9,7 @@ from unittest.mock import patch
 from codex_configurator.cli import _choose_context_config, main
 from codex_configurator.desktop_control import DesktopCloseResult
 from codex_configurator.discovery import DesktopProcess, DiscoveryResult
-from codex_configurator.errors import DesktopControlError
+from codex_configurator.errors import BackupSpaceError, DesktopControlError
 from codex_configurator.toml_merge import (
     CLEAR_CONTEXT,
     CONTEXT_500K,
@@ -538,6 +538,196 @@ class CliTests(unittest.TestCase):
             self.assertEqual(result, 0)
             self.assertIn("正式执行时将自动关闭", "\n".join(output))
             self.assertFalse((home / "config.toml").exists())
+
+    def test_low_space_prompts_for_external_backup_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "codex"
+            fallback = Path(temp) / "other-drive" / "Xi-AI-Backups"
+            home.mkdir()
+            answers = iter(["", "1", "n", str(fallback)])
+            output = []
+            prompts = []
+            checks = []
+
+            def check_space(_home, _changes, root=None):
+                checks.append(root)
+                if root is None:
+                    raise BackupSpaceError("备份空间不足")
+
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.fetch_remote_model_ids",
+                return_value=["remote-model"],
+            ), patch(
+                "codex_configurator.cli.check_backup_space",
+                side_effect=check_space,
+            ), patch(
+                "codex_configurator.cli.candidate_backup_roots",
+                return_value=(fallback,),
+            ), patch(
+                "codex_configurator.cli.apply_setup",
+                return_value=fallback / "20260819-000000-000000",
+            ) as apply, patch(
+                "codex_configurator.cli.validate_installed",
+                return_value={"model": "remote-model"},
+            ):
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: prompts.append(prompt) or next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    output=output.append,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(checks, [None, None, fallback])
+            self.assertEqual(apply.call_args.kwargs["backup_root"], fallback)
+            rendered = "\n".join(output)
+            self.assertIn("备份空间不足", rendered)
+            self.assertTrue(any("请输入备用备份目录" in prompt for prompt in prompts))
+            self.assertNotIn("placeholder-key", rendered)
+
+    def test_low_space_blank_backup_root_aborts_before_writing(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "n", ""])
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.fetch_remote_model_ids",
+                return_value=["remote-model"],
+            ), patch(
+                "codex_configurator.cli.check_backup_space",
+                side_effect=BackupSpaceError("备份空间不足"),
+            ), patch(
+                "codex_configurator.cli.candidate_backup_roots",
+                return_value=(),
+            ), patch(
+                "codex_configurator.cli.apply_setup",
+            ) as apply:
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    output=lambda value: None,
+                )
+
+            self.assertEqual(result, 1)
+            apply.assert_not_called()
+            self.assertFalse((home / "config.toml").exists())
+
+    def test_low_space_dry_run_reports_without_prompting_for_backup_root(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "n"])
+            output = []
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.fetch_remote_model_ids",
+                return_value=["remote-model"],
+            ), patch(
+                "codex_configurator.cli.check_backup_space",
+                side_effect=BackupSpaceError("备份空间不足"),
+            ), patch(
+                "codex_configurator.cli.candidate_backup_roots",
+                side_effect=AssertionError("dry-run must not enumerate backup roots"),
+            ), patch(
+                "codex_configurator.cli.apply_setup",
+                side_effect=AssertionError("dry-run must not create a backup"),
+            ):
+                result = main(
+                    ["setup", "--dry-run", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    output=output.append,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertIn("试运行提示：备份空间不足", "\n".join(output))
+            self.assertFalse((home / "backup-xi-ai").exists())
+
+    def test_explicit_low_space_root_aborts_without_fallback_prompt(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "codex"
+            explicit = Path(temp) / "other-drive" / "Xi-AI-Backups"
+            home.mkdir()
+            answers = iter(["", "1", "n"])
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ), patch(
+                "codex_configurator.cli.fetch_remote_model_ids",
+                return_value=["remote-model"],
+            ), patch(
+                "codex_configurator.cli.check_backup_space",
+                side_effect=BackupSpaceError("备份空间不足"),
+            ), patch(
+                "codex_configurator.cli.candidate_backup_roots",
+                side_effect=AssertionError("explicit root must not prompt for fallback"),
+            ), patch("codex_configurator.cli.apply_setup") as apply:
+                result = main(
+                    [
+                        "setup",
+                        "--codex-home",
+                        str(home),
+                        "--backup-root",
+                        str(explicit),
+                    ],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    output=lambda value: None,
+                )
+
+            self.assertEqual(result, 1)
+            apply.assert_not_called()
+            self.assertFalse((home / "config.toml").exists())
+
+    def test_restore_backup_root_selects_latest_external_backup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "codex"
+            root = Path(temp) / "other-drive" / "Xi-AI-Backups"
+            backup = root / "20260819-000000-000000"
+            home.mkdir()
+            with patch(
+                "codex_configurator.cli.discover",
+                return_value=DiscoveryResult(home, None, None),
+            ), patch(
+                "codex_configurator.cli.latest_backup",
+                return_value=backup,
+            ) as latest, patch(
+                "codex_configurator.cli.restore_backup",
+            ) as restore:
+                result = main(
+                    [
+                        "restore",
+                        "--codex-home",
+                        str(home),
+                        "--backup-root",
+                        str(root),
+                    ],
+                    output=lambda value: None,
+                )
+
+            self.assertEqual(result, 0)
+            resolved_root = root.resolve()
+            latest.assert_called_once_with(home, resolved_root)
+            restore.assert_called_once_with(home, backup, backup_root=resolved_root)
 
     def test_respawn_after_close_aborts_before_writing(self):
         with tempfile.TemporaryDirectory() as temp:

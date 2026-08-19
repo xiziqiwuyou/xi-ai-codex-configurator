@@ -15,6 +15,7 @@ class RolloutChange:
     path: Path
     updated_first_line: bytes
     mtime_ns: int
+    original_first_line: bytes = b""
 
     def materialize(self) -> bytes:
         with self.path.open("rb") as handle:
@@ -64,13 +65,15 @@ def collect_rollout_changes(
     for index, path in enumerate(paths, start=1):
         try:
             with path.open("rb") as handle:
-                updated = _update_session_meta(handle.readline(), target_provider)
+                first_line = handle.readline()
+                updated = _update_session_meta(first_line, target_provider)
         except OSError as exc:
             raise SessionMigrationError(f"无法读取会话记录文件：{path}") from exc
         if updated is not None:
             changes.append(
                 RolloutChange(
                     path=path,
+                    original_first_line=first_line,
                     updated_first_line=updated,
                     mtime_ns=path.stat().st_mtime_ns,
                 )

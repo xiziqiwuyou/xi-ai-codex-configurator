@@ -32,3 +32,9 @@ class SessionMigrationError(ConfiguratorError):
 
 class TransactionError(ConfiguratorError):
     pass
+
+
+class BackupSpaceError(TransactionError):
+    """The selected backup volume cannot safely hold the transaction backup."""
+
+    pass

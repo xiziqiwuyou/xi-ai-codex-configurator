@@ -7,7 +7,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from codex_configurator.errors import SessionMigrationError, TransactionError
+import codex_configurator.transaction as transaction_module
+from codex_configurator.errors import (
+    BackupSpaceError,
+    SessionMigrationError,
+    TransactionError,
+)
 from codex_configurator.progress import ConsoleProgress, ProgressEvent
 from codex_configurator.sessions import (
     backup_sqlite,
@@ -18,7 +23,11 @@ from codex_configurator.sessions import (
 from codex_configurator.transaction import (
     SetupChanges,
     apply_setup,
+    atomic_rewrite_rollout,
+    check_backup_space,
+    latest_backup,
     create_backup,
+    estimate_backup_space,
     restore_backup,
 )
 
@@ -246,7 +255,8 @@ class TransactionTests(unittest.TestCase):
         config.write_text('model = "old"\n', encoding="utf-8")
         catalog.write_text('{"models":[{"slug":"old"}]}\n', encoding="utf-8")
         rollout.write_text(
-            '{"type":"session_meta","payload":{"id":"a","model_provider":"openai"}}\n',
+            '{"type":"session_meta","payload":{"id":"a","model_provider":"openai"}}\n'
+            '{"type":"event","payload":{"message":"must survive rollback"}}\n',
             encoding="utf-8",
         )
         create_state_database(home / "state_5.sqlite")
@@ -318,6 +328,423 @@ class TransactionTests(unittest.TestCase):
                     create_backup(home, changes)
             backup_root = home / "backup-xi-ai"
             self.assertFalse(list(backup_root.iterdir()))
+
+    def test_compact_backup_preserves_rollout_tail_and_uses_patch_size(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp) / "codex"
+            home.mkdir()
+            config = home / "config.toml"
+            catalog = home / "xi-ai-model-catalog.json"
+            rollout = home / "sessions/2026/08/19/large.jsonl"
+            rollout.parent.mkdir(parents=True)
+            config.write_bytes(b'model = "old"\r\n')
+            catalog.write_bytes(b'{"models":[]}\n')
+            tail = b'{"type":"event","payload":{"message":"keep"}}\n' * 2000
+            original_first_line = (
+                b'{"type":"session_meta","payload":{"model_provider":"openai"}}\n'
+            )
+            rollout.write_bytes(original_first_line + tail)
+            change = collect_rollout_changes(home, "xi_ai")[0]
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=catalog,
+                catalog_content=b'{"models":[{"slug":"new"}]}\n',
+                rollout_changes=(change,),
+            )
+
+            backup = apply_setup(home, changes)
+
+            manifest = json.loads((backup / "manifest.json").read_text())
+            rollout_entry = next(
+                entry
+                for entry in manifest["files"]
+                if entry["path"].endswith("large.jsonl")
+            )
+            self.assertEqual(manifest["version"], 2)
+            self.assertEqual(rollout_entry["kind"], "rollout_first_line")
+            self.assertEqual(
+                (backup / rollout_entry["backup"]).read_bytes(),
+                original_first_line,
+            )
+            self.assertFalse((backup / "files" / "sessions").exists())
+            backup_bytes = sum(
+                path.stat().st_size for path in backup.rglob("*") if path.is_file()
+            )
+            self.assertLess(backup_bytes, len(tail))
+
+            restore_backup(home, backup)
+
+            self.assertEqual(rollout.read_bytes(), original_first_line + tail)
+
+    def test_external_backup_root_and_latest_lookup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / "codex"
+            external = root / "other-drive" / "Xi-AI-Backups"
+            home.mkdir()
+            config = home / "config.toml"
+            config.write_bytes(b'model = "old"\n')
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=home / "xi-ai-model-catalog.json",
+                catalog_content=b'{"models":[]}\n',
+            )
+
+            backup = apply_setup(home, changes, backup_root=external)
+
+            self.assertTrue(backup.is_relative_to(external))
+            self.assertEqual(latest_backup(home, external), backup)
+            restore_backup(home, backup, backup_root=external)
+            self.assertEqual(config.read_bytes(), b'model = "old"\n')
+
+    def test_legacy_v1_full_backup_remains_restorable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            config = home / "config.toml"
+            config.write_bytes(b'model = "old"\n')
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=home / "xi-ai-model-catalog.json",
+                catalog_content=b'{"models":[]}\n',
+            )
+            backup = apply_setup(home, changes)
+            manifest_path = backup / "manifest.json"
+            manifest = json.loads(manifest_path.read_text())
+            manifest["version"] = 1
+            for entry in manifest["files"]:
+                entry.pop("kind", None)
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            restore_backup(home, backup)
+
+            self.assertEqual(config.read_bytes(), b'model = "old"\n')
+
+    def test_genuine_v1_full_rollout_backup_restores_tail_and_mtime(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            config = home / "config.toml"
+            rollout = home / "sessions/2026/08/19/legacy.jsonl"
+            rollout.parent.mkdir(parents=True)
+            original_config = b'model = "old"\n'
+            original_rollout = (
+                b'{"type":"session_meta","payload":{"model_provider":"openai"}}\n'
+                b'{"type":"event","payload":{"message":"legacy tail"}}\n'
+            )
+            original_mtime = 1_700_000_000_123_456_700
+            config.write_bytes(b'model = "new"\n')
+            rollout.write_bytes(
+                b'{"type":"session_meta","payload":{"model_provider":"xi_ai"}}\n'
+                b'{"type":"event","payload":{"message":"legacy tail"}}\n'
+            )
+            backup = home / "backup-xi-ai" / "20260819-legacy"
+            config_source = backup / "files/config.toml"
+            rollout_source = backup / "files/sessions/2026/08/19/legacy.jsonl"
+            config_source.parent.mkdir(parents=True)
+            rollout_source.parent.mkdir(parents=True)
+            config_source.write_bytes(original_config)
+            rollout_source.write_bytes(original_rollout)
+            manifest = {
+                "version": 1,
+                "created_at": "2026-08-19T00:00:00+00:00",
+                "provider": "xi_ai",
+                "codex_home": str(home.resolve()),
+                "files": [
+                    {
+                        "path": "config.toml",
+                        "existed": True,
+                        "backup": "files/config.toml",
+                        "sha256": transaction_module.sha256_file(config_source),
+                        "mtime_ns": original_mtime,
+                    },
+                    {
+                        "path": "sessions/2026/08/19/legacy.jsonl",
+                        "existed": True,
+                        "backup": "files/sessions/2026/08/19/legacy.jsonl",
+                        "sha256": transaction_module.sha256_file(rollout_source),
+                        "mtime_ns": original_mtime,
+                    },
+                ],
+                "sqlite": {"path": "state_5.sqlite", "existed": False},
+                "session_migration": False,
+            }
+            (backup / "manifest.json").write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+
+            restore_backup(home, backup)
+
+            self.assertEqual(config.read_bytes(), original_config)
+            self.assertEqual(rollout.read_bytes(), original_rollout)
+            self.assertEqual(rollout.stat().st_mtime_ns, original_mtime)
+
+    def test_v1_manifest_kind_cannot_upgrade_to_compact_semantics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            config = home / "config.toml"
+            config.write_bytes(b'model = "old"\n')
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=home / "xi-ai-model-catalog.json",
+                catalog_content=b'{"models":[]}\n',
+            )
+            backup = apply_setup(home, changes)
+            path = backup / "manifest.json"
+            manifest = json.loads(path.read_text())
+            manifest["version"] = 1
+            manifest["files"][0]["kind"] = "rollout_first_line"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+
+            restore_backup(home, backup)
+
+            self.assertEqual(config.read_bytes(), b'model = "old"\n')
+
+    def test_v2_manifest_requires_explicit_kind_before_any_write(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            changes, _ = self._make_changes(home)
+            backup = apply_setup(home, changes)
+            manifest_path = backup / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            rollout_entry = next(
+                entry
+                for entry in manifest["files"]
+                if entry["path"].endswith("rollout-test.jsonl")
+            )
+            rollout_entry.pop("kind")
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            config_after_setup = changes.config_path.read_bytes()
+            rollout_after_setup = changes.rollout_changes[0].path.read_bytes()
+
+            with self.assertRaises(TransactionError):
+                restore_backup(home, backup)
+
+            self.assertEqual(changes.config_path.read_bytes(), config_after_setup)
+            self.assertEqual(
+                changes.rollout_changes[0].path.read_bytes(), rollout_after_setup
+            )
+
+    def test_backup_rejects_full_file_that_changes_during_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            changes, originals = self._make_changes(home)
+            real_fstat = os.fstat
+            calls = 0
+
+            def drifting_fstat(descriptor):
+                nonlocal calls
+                calls += 1
+                result = real_fstat(descriptor)
+                if calls == 2:
+                    values = list(result)
+                    values[6] += 1
+                    return os.stat_result(values)
+                return result
+
+            with patch(
+                "codex_configurator.transaction.os.fstat",
+                side_effect=drifting_fstat,
+            ):
+                with self.assertRaises(TransactionError):
+                    create_backup(home, changes)
+
+            self.assertEqual(
+                changes.config_path.read_bytes(), originals[changes.config_path]
+            )
+            self.assertFalse(list((home / "backup-xi-ai").iterdir()))
+
+    def test_backup_rejects_rollout_that_changes_after_tail_snapshot(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            changes, originals = self._make_changes(home)
+            rollout = changes.rollout_changes[0].path
+            real_snapshot = transaction_module._snapshot_rollout
+
+            def drifting_snapshot(path):
+                result = real_snapshot(path)
+                path.write_bytes(path.read_bytes() + b'{"type":"late-event"}\n')
+                return result
+
+            with patch(
+                "codex_configurator.transaction._snapshot_rollout",
+                side_effect=drifting_snapshot,
+            ):
+                with self.assertRaises(TransactionError):
+                    create_backup(home, changes)
+
+            self.assertEqual(
+                changes.config_path.read_bytes(), originals[changes.config_path]
+            )
+            self.assertTrue(rollout.read_bytes().endswith(b'{"type":"late-event"}\n'))
+            self.assertFalse(list((home / "backup-xi-ai").iterdir()))
+
+    def test_backup_rejects_missing_planned_rollout(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            changes, _ = self._make_changes(home)
+            changes.rollout_changes[0].path.unlink()
+
+            with self.assertRaises(TransactionError):
+                create_backup(home, changes)
+
+            self.assertFalse(list((home / "backup-xi-ai").iterdir()))
+
+    def test_atomic_rollout_rewrite_rejects_post_scan_changes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            changes, _ = self._make_changes(home)
+            change = changes.rollout_changes[0]
+            drifted = change.path.read_bytes() + b'{"type":"late-event"}\n'
+            change.path.write_bytes(drifted)
+
+            with self.assertRaises(TransactionError):
+                atomic_rewrite_rollout(change)
+
+            self.assertEqual(change.path.read_bytes(), drifted)
+
+    def test_low_space_is_rejected_before_any_mutation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            config = home / "config.toml"
+            config.write_bytes(b'model = "old"\n')
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=home / "xi-ai-model-catalog.json",
+                catalog_content=b'{"models":[]}\n',
+            )
+            usage = shutil.disk_usage(home)
+            low = usage._replace(free=0)
+            with patch(
+                "codex_configurator.transaction.shutil.disk_usage",
+                return_value=low,
+            ):
+                with self.assertRaises(BackupSpaceError):
+                    apply_setup(home, changes)
+            self.assertEqual(config.read_bytes(), b'model = "old"\n')
+            self.assertFalse((home / "xi-ai-model-catalog.json").exists())
+
+    def test_external_volume_space_thresholds_are_checked_independently(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            home = root / "codex"
+            external = root / "external"
+            home.mkdir()
+            external.mkdir()
+            config = home / "config.toml"
+            config.write_bytes(b'model = "old"\n')
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=home / "xi-ai-model-catalog.json",
+                catalog_content=b'{"models":[]}\n',
+            )
+            estimate = estimate_backup_space(home, changes)
+            usage = shutil.disk_usage(home)
+
+            def usage_with(destination_free, home_free):
+                def fake_usage(path):
+                    resolved = Path(path).resolve()
+                    free = destination_free if resolved == external else home_free
+                    return usage._replace(free=free)
+
+                return fake_usage
+
+            with patch(
+                "codex_configurator.transaction._same_filesystem",
+                return_value=False,
+            ), patch(
+                "codex_configurator.transaction.shutil.disk_usage",
+                side_effect=usage_with(
+                    estimate.backup_bytes,
+                    estimate.local_temp_bytes,
+                ),
+            ):
+                self.assertEqual(
+                    check_backup_space(home, changes, external).backup_bytes,
+                    estimate.backup_bytes,
+                )
+
+            with patch(
+                "codex_configurator.transaction._same_filesystem",
+                return_value=False,
+            ), patch(
+                "codex_configurator.transaction.shutil.disk_usage",
+                side_effect=usage_with(
+                    estimate.backup_bytes - 1,
+                    estimate.local_temp_bytes,
+                ),
+            ):
+                with self.assertRaises(BackupSpaceError):
+                    check_backup_space(home, changes, external)
+
+            with patch(
+                "codex_configurator.transaction._same_filesystem",
+                return_value=False,
+            ), patch(
+                "codex_configurator.transaction.shutil.disk_usage",
+                side_effect=usage_with(
+                    estimate.backup_bytes,
+                    estimate.local_temp_bytes - 1,
+                ),
+            ):
+                with self.assertRaises(BackupSpaceError):
+                    check_backup_space(home, changes, external)
+
+    def test_compact_manifest_rejects_non_rollout_and_missing_entries(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            config = home / "config.toml"
+            config.write_bytes(b'model = "old"\n')
+            changes = SetupChanges(
+                config_path=config,
+                config_content=b'model = "new"\n',
+                catalog_path=home / "xi-ai-model-catalog.json",
+                catalog_content=b'{"models":[]}\n',
+            )
+            backup = apply_setup(home, changes)
+            path = backup / "manifest.json"
+            manifest = json.loads(path.read_text())
+            manifest["files"][0]["kind"] = "rollout_first_line"
+            path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaises(TransactionError):
+                restore_backup(home, backup)
+
+    def test_compact_restore_rejects_corruption_duplicates_and_tail_drift(self):
+        for corruption in ("patch", "duplicate", "tail"):
+            with self.subTest(corruption=corruption), tempfile.TemporaryDirectory() as temp:
+                home = Path(temp)
+                changes, _ = self._make_changes(home)
+                backup = apply_setup(home, changes)
+                manifest_path = backup / "manifest.json"
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                rollout_entry = next(
+                    entry
+                    for entry in manifest["files"]
+                    if entry["path"].endswith("rollout-test.jsonl")
+                )
+                rollout = changes.rollout_changes[0].path
+                if corruption == "patch":
+                    patch_path = backup / rollout_entry["backup"]
+                    damaged = bytearray(patch_path.read_bytes())
+                    damaged[0] ^= 1
+                    patch_path.write_bytes(bytes(damaged))
+                elif corruption == "duplicate":
+                    manifest["files"].append(dict(manifest["files"][0]))
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                else:
+                    rollout.write_bytes(rollout.read_bytes() + b'{"type":"late"}\n')
+                config_after_setup = changes.config_path.read_bytes()
+                rollout_after_corruption = rollout.read_bytes()
+
+                with self.assertRaises(TransactionError):
+                    restore_backup(home, backup)
+
+                self.assertEqual(changes.config_path.read_bytes(), config_after_setup)
+                self.assertEqual(rollout.read_bytes(), rollout_after_corruption)
 
     def test_verified_setup_backs_up_then_migrates_retained_wal(self):
         with tempfile.TemporaryDirectory() as temp:

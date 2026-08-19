@@ -14,7 +14,7 @@ from .discovery import (
     discover_running_codex_processes,
 )
 from .endpoints import PROVIDER_ID
-from .errors import ConfiguratorError
+from .errors import BackupSpaceError, ConfiguratorError
 from .progress import ConsoleProgress
 from .remote_models import fetch_remote_model_ids
 from .sessions import collect_rollout_changes, sqlite_columns, sqlite_path
@@ -26,7 +26,14 @@ from .toml_merge import (
     ContextConfig,
     merge_config,
 )
-from .transaction import SetupChanges, apply_setup, latest_backup, restore_backup
+from .transaction import (
+    SetupChanges,
+    apply_setup,
+    candidate_backup_roots,
+    check_backup_space,
+    latest_backup,
+    restore_backup,
+)
 from .validation import parse_catalog, parse_toml, validate_installed
 
 
@@ -161,6 +168,42 @@ def _require_no_desktop_processes(detector, *, after_close: bool) -> None:
         )
 
 
+def _choose_backup_root(
+    codex_home: Path,
+    changes: SetupChanges,
+    requested: str | None,
+    *,
+    input_fn=input,
+    output=print,
+) -> Path | None:
+    explicit = Path(requested).expanduser() if requested else None
+    try:
+        check_backup_space(codex_home, changes, explicit)
+        return explicit
+    except BackupSpaceError as exc:
+        if explicit is not None:
+            raise ConfiguratorError(str(exc)) from exc
+        output(f"{exc}")
+        candidates = candidate_backup_roots(codex_home, changes)
+        if candidates:
+            output("可用的备用备份目录建议：")
+            for candidate in candidates:
+                output(f"  {candidate}")
+        else:
+            output("未自动找到有足够空间的备用磁盘。")
+        selected = input_fn(
+            "请输入备用备份目录（回车取消，取消将不会修改任何文件）："
+        ).strip()
+        if not selected:
+            raise ConfiguratorError("未选择备用备份目录，已停止配置") from exc
+        fallback = Path(selected).expanduser()
+        try:
+            check_backup_space(codex_home, changes, fallback)
+        except BackupSpaceError as fallback_exc:
+            raise ConfiguratorError(str(fallback_exc)) from fallback_exc
+        return fallback
+
+
 def _read_existing_config(path: Path) -> str:
     if not path.is_file():
         return ""
@@ -273,6 +316,24 @@ def _setup(
     output(f"  模型总数: {len(merged['models'])}")
     output(f"  迁移现有对话: {'是' if migrate_sessions else '否'}")
     output(f"  待更新会话文件: {len(rollout_changes)}")
+    changes = SetupChanges(
+        config_path=config_path,
+        config_content=config_content,
+        catalog_path=catalog_path,
+        catalog_content=catalog_content,
+        rollout_changes=rollout_changes,
+        migrate_sessions=migrate_sessions,
+    )
+    try:
+        check_backup_space(
+            result.codex_home,
+            changes,
+            Path(args.backup_root).expanduser() if args.backup_root else None,
+        )
+        output("  预计备份空间检查：通过")
+    except BackupSpaceError as exc:
+        if args.dry_run:
+            output(f"  试运行提示：{exc}")
     if args.dry_run:
         output("试运行完成：未写入任何文件。")
         return 0
@@ -283,18 +344,18 @@ def _setup(
             after_close=True,
         )
 
-    changes = SetupChanges(
-        config_path=config_path,
-        config_content=config_content,
-        catalog_path=catalog_path,
-        catalog_content=catalog_content,
-        rollout_changes=rollout_changes,
-        migrate_sessions=migrate_sessions,
+    backup_root = _choose_backup_root(
+        result.codex_home,
+        changes,
+        args.backup_root,
+        input_fn=input_fn,
+        output=output,
     )
     backup_dir = apply_setup(
         result.codex_home,
         changes,
         allow_wal_recovery=migrate_sessions,
+        backup_root=backup_root,
         progress=session_progress,
     )
     validated = validate_installed(result.codex_home)
@@ -334,12 +395,18 @@ def _validate(args, *, output=print) -> int:
 
 def _restore(args, *, output=print) -> int:
     result = discover(codex_home=args.codex_home, codex_bin=args.codex_bin)
+    requested_root = (
+        Path(args.backup_root).expanduser().resolve() if args.backup_root else None
+    )
     backup = (
         Path(args.backup).expanduser().resolve()
         if args.backup
-        else latest_backup(result.codex_home)
+        else latest_backup(result.codex_home, requested_root)
     )
-    restore_backup(result.codex_home, backup)
+    restore_root = requested_root
+    if args.backup and restore_root is None:
+        restore_root = backup.parent
+    restore_backup(result.codex_home, backup, backup_root=restore_root)
     output(f"已恢复 Xi-AI 备份：{backup}")
     output("请重启 Codex 后再继续使用。")
     return 0
@@ -361,8 +428,16 @@ def build_parser() -> argparse.ArgumentParser:
                 action="store_true",
                 help="仅探测 Codex 路径和进程，不请求 Key，也不写入文件",
             )
+            subparser.add_argument(
+                "--backup-root",
+                help="指定备份根目录，可放在其他磁盘",
+            )
         if name == "restore":
             subparser.add_argument("--backup", help="恢复指定的备份目录")
+            subparser.add_argument(
+                "--backup-root",
+                help="从指定备份根目录恢复最新备份",
+            )
     return parser
 
 

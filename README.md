@@ -155,9 +155,9 @@ The setup flow is interactive:
 7. If `Y` is selected, the tool closes the exact detected Codex desktop
    instance. It requests a normal exit for 15 seconds, then revalidates and
    force-stops only that instance if necessary.
-8. The tool shows scan/backup/migration progress, creates a complete backup,
-   and applies the validated configuration. Large batches are throttled so the
-   terminal remains readable.
+8. The tool estimates backup space, shows scan/backup/migration progress,
+   creates a compact rollback backup, and applies the validated configuration.
+   Large batches are throttled so the terminal remains readable.
 
 ## Path Discovery
 
@@ -265,16 +265,31 @@ Backups are stored under:
 <CODEX_HOME>/backup-xi-ai/<timestamp>/
 ```
 
-Each backup contains a secret-free manifest, SHA-256 hashes, original config
-and catalog files, affected rollout files, and a consistent SQLite snapshot
-when conversation migration is selected.
+Each new backup contains a secret-free v2 manifest, complete config/catalog
+files, a consistent SQLite snapshot when conversation migration is selected,
+and compact patches containing only the original first line of each changed
+rollout file. Historical session messages are not duplicated. Existing v1
+full-file backups remain restorable.
+
+If the Codex home volume does not have enough space, setup stops before writing
+and asks for a backup directory on another volume. You can provide one
+up-front:
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m codex_configurator setup --backup-root D:\Xi-AI-Backups
+```
 
 Restore the latest backup with:
 
 ```powershell
 $env:PYTHONPATH = "src"
-python -m codex_configurator restore
+python -m codex_configurator restore --backup-root D:\Xi-AI-Backups
 ```
+
+To restore one exact backup directory, use `--backup PATH`. An empty response
+to the low-space prompt cancels setup; the tool never skips the backup and
+continues with irreversible writes.
 
 Restart Codex after setup or restore.
 
