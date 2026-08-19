@@ -141,7 +141,7 @@ session progress producer.
 
 `setup --detect-only` prints discovery information and returns without reading
 the token, calling Xi-AI, or writing configuration, catalog, rollout, SQLite,
-or backup files. The standalone GitHub bootstrap defaults to this mode; normal
+or backup files. The standalone HTTPS bootstrap defaults to this mode; normal
 configuration requires its explicit `--configure` switch.
 
 ### Discovery boundary
@@ -178,20 +178,26 @@ normalized to `DesktopControlError`. On POSIX, `ProcessLookupError` after the
 verified root is killed is benign only when the final snapshot confirms that
 the backend has exited.
 
-### GitHub release assets
+### FTPS publishing and HTTPS release assets
 
 Public releases use exact asset names `xi-ai-codex-bundle.zip`,
 `xi-ai-codex-bundle.zip.sha256`, `xi-ai-codex-bootstrap.py`,
-`xi-ai-codex-bootstrap.py.sha256`, and `xi-ai-codex-release.json`. The
-standalone bootstrap downloads the GitHub release metadata plus the bundle and
-its checksum. It prefers each asset's
-`api.github.com/.../releases/assets/<id>` URL with
-`Accept: application/octet-stream`, validates that API host/path, and uses
-`browser_download_url` only as a compatibility fallback. It verifies that the
-checksum names the expected bundle, rejects unsafe or colliding ZIP entries,
-extracts to a versioned cache, and runs the local bundle. Transient URL/OS
-connection failures are retried three times with bounded exponential backoff;
-HTTP and validation errors fail immediately.
+`xi-ai-codex-bootstrap.py.sha256`, and `xi-ai-codex-release.json`. GitHub tags
+trigger publishing, but GitHub Release API is not a client or artifact source.
+Actions uploads over explicit TLS/passive FTPS to a staging directory, verifies
+all five files through their public HTTPS URLs, then atomically renames staging
+to the immutable `/xi-ai-codex/<tag>/` directory. Only after that it uploads a
+temporary `latest.json` and renames it last. Repeating an existing tag fails.
+
+The standalone bootstrap trusts only `https://download.xi-ai.net/xi-ai-codex`.
+`latest` reads the exact `latest.json` pointer, then the matching version
+manifest; an explicit tag reads only that version manifest. It constructs asset
+URLs itself and rejects other hosts, ports, queries, fragments, redirects,
+unsafe tags, and unknown asset names. It validates manifest schema, asset names,
+sizes and SHA-256, then validates each independent checksum file, rejects unsafe
+or colliding ZIP entries, extracts to a versioned cache, and runs the local
+bundle. Transient URL/OS connection failures are retried three times with
+bounded exponential backoff; HTTP and validation errors fail immediately.
 
 The release manifest schema is:
 
@@ -212,16 +218,13 @@ The release manifest schema is:
 }
 ```
 
-The repository must be supplied as `--repo OWNER/REPO` or
-`GITHUB_REPOSITORY`; the tool must not guess an owner or repository. A release
-tag must be supplied with `--version TAG` or `XI_AI_CODEX_VERSION`; `latest`
-is allowed only when explicitly requested.
-
-README one-line commands hard-code the public repository, resolve `latest`
-through the GitHub API, download both bootstrap and checksum through the binary
-release-asset API, verify SHA-256, then run the local bootstrap with the
-resolved tag and `--configure`. They must not pipe downloaded script text into
-PowerShell or a POSIX shell.
+The bootstrap does not accept or infer a GitHub repository. A release tag may be
+supplied with `--version TAG` or `XI_AI_CODEX_VERSION`; the default is the
+validated `latest.json` pointer. README one-line commands hard-code the public
+HTTPS source, validate the pointer, manifest, bootstrap checksum and size, then
+run the local bootstrap with the resolved tag and `--configure`. They must not
+pipe downloaded script text into PowerShell or a POSIX shell, and must never
+contain FTPS credentials.
 
 ### Model response and catalog
 
@@ -269,7 +272,7 @@ token. SQLite backups use `VACUUM INTO` before mutation.
 | Condition | Required result |
 | --- | --- |
 | Python is missing or older than 3.11 | launcher exits before setup |
-| Bootstrap runs under Python older than 3.11 | reject before any GitHub request |
+| Bootstrap runs under Python older than 3.11 | reject before any HTTPS request |
 | Codex executable is missing | configure may use bundled fallback; `Y` migration is rejected |
 | Empty token | exit with no target-file writes |
 | HTTP 401/403 or malformed model JSON | exit with no target-file writes |
@@ -289,9 +292,9 @@ token. SQLite backups use `VACUUM INTO` before mutation.
 | PID/path/command/root identity changes before force | reject before force or target-file writes |
 | Desktop inspection fails or a backend remains/respawns after close | reject before target-file writes |
 | Release bundle is missing or checksum mismatches | reject before extraction or local execution |
-| Release metadata contains a non-GitHub asset API URL | reject before asset download |
-| Bootstrap has no `--repo` and no `GITHUB_REPOSITORY` | reject before GitHub request |
-| Bootstrap has no `--version` or `XI_AI_CODEX_VERSION` | reject before GitHub request |
+| Release metadata contains an unknown host, asset, path, redirect, size, or hash | reject before extraction or setup |
+| `latest.json` is missing, malformed, or points to an unsafe version | reject before version manifest download |
+| Bootstrap has no `--version` or `XI_AI_CODEX_VERSION` | resolve the fixed HTTPS `latest.json` pointer |
 | Bootstrap runs without `--configure` | forward `--detect-only` and never prompt for Key |
 
 User-facing errors must not include authorization headers, token values, or
@@ -359,10 +362,11 @@ raw response bodies.
 - Discovery tests assert CLI/process separation, candidate fall-through,
   AppX JSON parsing, PPID/root derivation, marker confidence, process filtering,
   and the no-write `--detect-only` mode.
-- Bootstrap tests assert GitHub metadata parsing, asset selection, checksum
-  failure, transient connection retries, ZIP traversal/symlink rejection,
-  cache extraction, setup-argument forwarding, known/unknown-length progress,
-  retry reset, TTY/non-TTY rendering, and binary GitHub asset API requests.
+- Bootstrap tests assert fixed HTTPS URL construction, latest pointer and
+  manifest parsing, host/path/redirect rejection, independent checksum and
+  manifest failures, transient connection retries, ZIP traversal/symlink
+  rejection, cache extraction, setup-argument forwarding, known/unknown-length
+  progress, retry reset, and TTY/non-TTY rendering.
 - Context tests assert preserve, 500K, 1M, clear, strict integer TOML values,
   supported-model-only prompting, and no context prompt for other models.
 - Session/transaction tests assert progress ordering, throttling, path-free
@@ -403,12 +407,15 @@ This executes mutable remote code before release verification.
 ### Correct
 
 ```sh
-curl --fail --location https://github.com/OWNER/REPO/releases/download/v1.0.0/xi-ai-codex-bootstrap.py -o bootstrap.py
-python3 bootstrap.py --repo OWNER/REPO --version v1.0.0 --detect-only
+curl --fail https://download.xi-ai.net/xi-ai-codex/v1.0.0/xi-ai-codex-bootstrap.py -o bootstrap.py
+curl --fail https://download.xi-ai.net/xi-ai-codex/v1.0.0/xi-ai-codex-bootstrap.py.sha256 -o bootstrap.py.sha256
+sha256sum -c bootstrap.py.sha256
+python3 bootstrap.py --version v1.0.0 --detect-only
 ```
 
-The bootstrap verifies the versioned bundle checksum and runs the local copy;
-it does not receive a Key in the download command.
+The local checksum is verified before Python executes. The bootstrap then
+verifies the version manifest, its own manifest entry, and the versioned bundle
+checksum; it does not receive a Key in the download command.
 
 ### Wrong
 

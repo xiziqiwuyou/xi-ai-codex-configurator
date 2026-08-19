@@ -19,22 +19,36 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal, TextIO
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlparse
-from urllib.request import Request, urlopen
+from urllib.parse import urlparse
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
 BUNDLE_NAME = "xi-ai-codex-bundle.zip"
 CHECKSUM_NAME = f"{BUNDLE_NAME}.sha256"
-MAX_API_BYTES = 5 * 1024 * 1024
+BOOTSTRAP_NAME = "xi-ai-codex-bootstrap.py"
+BOOTSTRAP_CHECKSUM_NAME = f"{BOOTSTRAP_NAME}.sha256"
+MANIFEST_NAME = "xi-ai-codex-release.json"
+LATEST_NAME = "latest.json"
+DOWNLOAD_HOST = "download.xi-ai.net"
+DOWNLOAD_BASE_PATH = "/xi-ai-codex"
+DOWNLOAD_BASE_URL = f"https://{DOWNLOAD_HOST}{DOWNLOAD_BASE_PATH}"
+MAX_METADATA_BYTES = 1024 * 1024
+MAX_BOOTSTRAP_BYTES = 10 * 1024 * 1024
 MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024
 MAX_EXTRACT_BYTES = 300 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 10_000
 DOWNLOAD_ATTEMPTS = 3
-REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
-ASSET_API_PATH_RE = re.compile(
-    r"^/repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/releases/assets/[1-9][0-9]*$"
+HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+CHECKSUM_HASH_RE = re.compile(r"^[0-9a-fA-F]{64}$")
+VERSION_ASSET_NAMES = frozenset(
+    {
+        BUNDLE_NAME,
+        CHECKSUM_NAME,
+        BOOTSTRAP_NAME,
+        BOOTSTRAP_CHECKSUM_NAME,
+        MANIFEST_NAME,
+    }
 )
 REQUIRED_PATHS = (
     Path("src/codex_configurator/__main__.py"),
@@ -46,6 +60,32 @@ REQUIRED_PATHS = (
 
 class BootstrapError(Exception):
     pass
+
+
+class _RejectRedirectHandler(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise BootstrapError("下载源不允许 HTTP 重定向")
+
+
+_STRICT_OPENER = build_opener(_RejectRedirectHandler())
+
+
+def _strict_urlopen(request: Request, timeout: int):
+    return _STRICT_OPENER.open(request, timeout=timeout)
+
+
+@dataclass(frozen=True)
+class ReleaseAsset:
+    name: str
+    sha256: str
+    size: int
+
+
+@dataclass(frozen=True)
+class ReleaseManifest:
+    version: str
+    bundle: ReleaseAsset
+    bootstrap: ReleaseAsset
 
 
 DownloadState = Literal["start", "update", "complete", "retry"]
@@ -176,30 +216,65 @@ def _require_supported_python(version_info=None) -> None:
         raise BootstrapError("需要 Python 3.11 或更高版本")
 
 
-def _is_asset_api_url(url: str) -> bool:
+def _validate_source_url(url: str) -> str:
+    if not isinstance(url, str):
+        raise BootstrapError("下载 URL 无效")
     parsed = urlparse(url)
-    return (
-        parsed.scheme == "https"
-        and parsed.hostname == "api.github.com"
-        and ASSET_API_PATH_RE.fullmatch(parsed.path) is not None
-        and not parsed.query
-        and not parsed.fragment
-    )
+    if (
+        parsed.scheme != "https"
+        or parsed.netloc != DOWNLOAD_HOST
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise BootstrapError("下载 URL 不在受信任的 HTTPS 源内")
+    if parsed.path == f"{DOWNLOAD_BASE_PATH}/{LATEST_NAME}":
+        return url
+    prefix = f"{DOWNLOAD_BASE_PATH}/"
+    if not parsed.path.startswith(prefix):
+        raise BootstrapError("下载 URL 路径无效")
+    parts = parsed.path[len(prefix) :].split("/")
+    if (
+        len(parts) != 2
+        or parts[0] == "latest"
+        or TAG_RE.fullmatch(parts[0]) is None
+        or parts[1] not in VERSION_ASSET_NAMES
+    ):
+        raise BootstrapError("下载 URL 路径无效")
+    return url
+
+
+def _latest_url() -> str:
+    return _validate_source_url(f"{DOWNLOAD_BASE_URL}/{LATEST_NAME}")
+
+
+def _version_asset_url(version: str, asset_name: str) -> str:
+    if (
+        version == "latest"
+        or TAG_RE.fullmatch(version) is None
+        or asset_name not in VERSION_ASSET_NAMES
+    ):
+        raise BootstrapError("版本或发布资产名称无效")
+    return _validate_source_url(f"{DOWNLOAD_BASE_URL}/{version}/{asset_name}")
 
 
 def _request(url: str) -> Request:
+    trusted_url = _validate_source_url(url)
+    is_latest = trusted_url == f"{DOWNLOAD_BASE_URL}/{LATEST_NAME}"
     accept = (
-        "application/octet-stream"
-        if _is_asset_api_url(url)
-        else "application/vnd.github+json"
+        "application/json"
+        if is_latest or trusted_url.endswith(f"/{MANIFEST_NAME}")
+        else "application/octet-stream"
     )
+    headers = {
+        "Accept": accept,
+        "User-Agent": "xi-ai-codex-bootstrap",
+    }
+    if is_latest:
+        headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
     return Request(
-        url,
-        headers={
-            "Accept": accept,
-            "User-Agent": "xi-ai-codex-bootstrap",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+        trusted_url,
+        headers=headers,
     )
 
 
@@ -216,7 +291,7 @@ def _read_limited(
     if content_length:
         try:
             if int(content_length) > limit:
-                raise BootstrapError("GitHub 响应超过下载大小限制")
+                raise BootstrapError("下载响应超过大小限制")
         except ValueError:
             pass
     total_size: int | None = None
@@ -249,7 +324,7 @@ def _read_limited(
             break
         total += len(chunk)
         if total > limit:
-            raise BootstrapError("GitHub 响应超过下载大小限制")
+            raise BootstrapError("下载响应超过大小限制")
         chunks.append(chunk)
         _emit_progress(
             progress,
@@ -262,7 +337,7 @@ def _read_limited(
             ),
         )
     if total_size is not None and total != total_size:
-        raise BootstrapError("GitHub 响应长度与 Content-Length 不一致")
+        raise BootstrapError("下载响应长度与 Content-Length 不一致")
     _emit_progress(
         progress,
         DownloadProgress(
@@ -279,7 +354,7 @@ def _read_limited(
 def _open_bytes(
     url: str,
     *,
-    opener=urlopen,
+    opener=_strict_urlopen,
     limit: int,
     progress: DownloadProgressCallback | None = None,
     stage: str = "下载",
@@ -297,6 +372,10 @@ def _open_bytes(
                 ),
             )
             with opener(_request(url), timeout=30) as response:
+                final_url = response.geturl() if hasattr(response, "geturl") else url
+                _validate_source_url(final_url)
+                if final_url != url:
+                    raise BootstrapError("下载源重定向到了不匹配的发布路径")
                 return _read_limited(
                     response,
                     limit,
@@ -308,7 +387,7 @@ def _open_bytes(
         except BootstrapError:
             raise
         except HTTPError as exc:
-            raise BootstrapError(f"GitHub 请求失败，HTTP {exc.code}") from exc
+            raise BootstrapError(f"HTTPS 下载请求失败，HTTP {exc.code}") from exc
         except (URLError, OSError) as exc:
             last_error = exc
             if attempt + 1 < DOWNLOAD_ATTEMPTS:
@@ -322,92 +401,136 @@ def _open_bytes(
                     ),
                 )
                 time.sleep(0.5 * (2**attempt))
-    raise BootstrapError("多次重试后仍无法连接 GitHub Releases") from last_error
-
-
-def _validate_repository(repository: str) -> str:
-    value = repository.strip()
-    if not REPOSITORY_RE.fullmatch(value):
-        raise BootstrapError("GitHub 仓库必须使用 OWNER/REPO 格式")
-    return value
+    raise BootstrapError("多次重试后仍无法连接 HTTPS 下载源") from last_error
 
 
 def _validate_version(version: str) -> str:
+    if not isinstance(version, str):
+        raise BootstrapError("发布版本无效")
     value = version.strip()
     if value != "latest" and not TAG_RE.fullmatch(value):
-        raise BootstrapError("GitHub Release 版本包含不支持的字符")
+        raise BootstrapError("发布版本包含不支持的字符")
     return value
 
 
-def _release_api_url(repository: str, version: str) -> str:
-    if version == "latest":
-        return f"https://api.github.com/repos/{repository}/releases/latest"
-    return (
-        f"https://api.github.com/repos/{repository}/releases/tags/"
-        f"{quote(version, safe='')}"
+def _parse_json_object(payload: bytes, description: str) -> dict:
+    def object_without_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate key")
+            result[key] = value
+        return result
+
+    def reject_constant(_value):
+        raise ValueError("non-finite number")
+
+    try:
+        value = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=object_without_duplicates,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise BootstrapError(f"{description}不是有效的 JSON") from exc
+    if not isinstance(value, dict):
+        raise BootstrapError(f"{description}必须是 JSON 对象")
+    return value
+
+
+def _parse_latest(payload: bytes) -> str:
+    pointer = _parse_json_object(payload, "latest.json")
+    if set(pointer) != {"schema_version", "version"}:
+        raise BootstrapError("latest.json 字段无效")
+    if type(pointer["schema_version"]) is not int or pointer["schema_version"] != 1:
+        raise BootstrapError("latest.json schema_version 无效")
+    version = pointer["version"]
+    if (
+        not isinstance(version, str)
+        or version == "latest"
+        or TAG_RE.fullmatch(version) is None
+    ):
+        raise BootstrapError("latest.json 版本无效")
+    return version
+
+
+def _parse_manifest_asset(
+    value: object,
+    *,
+    expected_name: str,
+    size_limit: int,
+) -> ReleaseAsset:
+    if not isinstance(value, dict) or set(value) != {"name", "sha256", "size"}:
+        raise BootstrapError(f"发布清单中的 {expected_name} 描述无效")
+    name = value["name"]
+    sha256 = value["sha256"]
+    size = value["size"]
+    if name != expected_name:
+        raise BootstrapError(f"发布清单中的资产名称不匹配：{expected_name}")
+    if not isinstance(sha256, str) or HASH_RE.fullmatch(sha256) is None:
+        raise BootstrapError(f"发布清单中的 SHA-256 无效：{expected_name}")
+    if type(size) is not int or size <= 0 or size > size_limit:
+        raise BootstrapError(f"发布清单中的资产大小无效：{expected_name}")
+    return ReleaseAsset(name=name, sha256=sha256, size=size)
+
+
+def _parse_manifest(payload: bytes, expected_version: str) -> ReleaseManifest:
+    manifest = _parse_json_object(payload, "发布清单")
+    if set(manifest) != {"schema_version", "version", "bundle", "bootstrap"}:
+        raise BootstrapError("发布清单字段无效")
+    if type(manifest["schema_version"]) is not int or manifest["schema_version"] != 1:
+        raise BootstrapError("发布清单 schema_version 无效")
+    version = manifest["version"]
+    if version != expected_version:
+        raise BootstrapError("发布清单版本与请求版本不一致")
+    return ReleaseManifest(
+        version=expected_version,
+        bundle=_parse_manifest_asset(
+            manifest["bundle"],
+            expected_name=BUNDLE_NAME,
+            size_limit=MAX_DOWNLOAD_BYTES,
+        ),
+        bootstrap=_parse_manifest_asset(
+            manifest["bootstrap"],
+            expected_name=BOOTSTRAP_NAME,
+            size_limit=MAX_BOOTSTRAP_BYTES,
+        ),
     )
-
-
-def _asset_url(release: dict, name: str) -> str:
-    assets = release.get("assets")
-    if not isinstance(assets, list):
-        raise BootstrapError("GitHub Release 中缺少 assets 数组")
-    for asset in assets:
-        if not isinstance(asset, dict) or asset.get("name") != name:
-            continue
-        api_url = asset.get("url")
-        if isinstance(api_url, str):
-            if not _is_asset_api_url(api_url):
-                raise BootstrapError(f"GitHub Release 资产 API URL 无效：{name}")
-            return api_url
-        url = asset.get("browser_download_url")
-        if not isinstance(url, str):
-            break
-        parsed = urlparse(url)
-        if parsed.scheme != "https" or parsed.hostname not in {
-            "github.com",
-            "objects.githubusercontent.com",
-            "github-releases.githubusercontent.com",
-        }:
-            raise BootstrapError(f"GitHub Release 资产 URL 无效：{name}")
-        return url
-    raise BootstrapError(f"GitHub Release 缺少资产：{name}")
 
 
 def resolve_release(
-    repository: str,
     version: str,
     *,
-    opener=urlopen,
+    opener=_strict_urlopen,
     progress: DownloadProgressCallback | None = None,
-) -> tuple[str, str, str]:
+) -> ReleaseManifest:
+    requested = _validate_version(version)
+    if requested == "latest":
+        pointer = _open_bytes(
+            _latest_url(),
+            opener=opener,
+            limit=MAX_METADATA_BYTES,
+            progress=progress,
+            stage="下载 latest.json",
+        )
+        requested = _parse_latest(pointer)
     payload = _open_bytes(
-        _release_api_url(repository, version),
+        _version_asset_url(requested, MANIFEST_NAME),
         opener=opener,
-        limit=MAX_API_BYTES,
+        limit=MAX_METADATA_BYTES,
         progress=progress,
-        stage="Release 元数据",
+        stage="下载发布清单",
     )
-    try:
-        release = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BootstrapError("GitHub 返回了无效的 Release 元数据") from exc
-    if not isinstance(release, dict):
-        raise BootstrapError("GitHub 返回了无效的 Release 元数据")
-    tag = release.get("tag_name")
-    if not isinstance(tag, str) or not TAG_RE.fullmatch(tag):
-        raise BootstrapError("GitHub Release 标签无效")
-    if version != "latest" and tag != version:
-        raise BootstrapError("GitHub Release 标签与请求的版本不一致")
-    return tag, _asset_url(release, BUNDLE_NAME), _asset_url(release, CHECKSUM_NAME)
+    return _parse_manifest(payload, requested)
 
 
 def _download(
     url: str,
     destination: Path,
     *,
-    opener=urlopen,
+    opener=_strict_urlopen,
     limit: int,
+    expected_size: int | None = None,
     progress: DownloadProgressCallback | None = None,
     stage: str = "下载",
 ) -> None:
@@ -418,6 +541,8 @@ def _download(
         progress=progress,
         stage=stage,
     )
+    if expected_size is not None and len(content) != expected_size:
+        raise BootstrapError("下载的发布资产大小与清单不一致")
     destination.write_bytes(content)
 
 
@@ -433,7 +558,7 @@ def _parse_checksum(path: Path, *, expected_name: str = BUNDLE_NAME) -> str:
     if len(lines) != 1:
         raise BootstrapError("Release 校验文件无效")
     fields = lines[0].split(maxsplit=1)
-    if len(fields) != 2 or not HASH_RE.fullmatch(fields[0]):
+    if len(fields) != 2 or not CHECKSUM_HASH_RE.fullmatch(fields[0]):
         raise BootstrapError("Release 校验文件无效")
     filename = fields[1].lstrip("*")
     if filename != expected_name:
@@ -452,6 +577,17 @@ def _sha256(path: Path) -> str:
 def _verify_checksum(path: Path, expected: str) -> None:
     if not hmac.compare_digest(_sha256(path), expected):
         raise BootstrapError("下载的 Release 程序包未通过 SHA-256 校验")
+
+
+def _verify_release_file(path: Path, asset: ReleaseAsset, description: str) -> None:
+    try:
+        size = path.stat().st_size
+    except OSError as exc:
+        raise BootstrapError(f"无法读取{description}") from exc
+    if size != asset.size:
+        raise BootstrapError(f"{description}大小与发布清单不一致")
+    if not hmac.compare_digest(_sha256(path), asset.sha256):
+        raise BootstrapError(f"{description}未通过发布清单 SHA-256 校验")
 
 
 def _safe_zip_member(name: str) -> PurePosixPath:
@@ -541,35 +677,45 @@ def _cached_bundle_is_valid(target: Path, expected_hash: str) -> bool:
 
 
 def install_release(
-    repository: str,
     version: str,
     cache_root: Path,
     *,
-    opener=urlopen,
+    opener=_strict_urlopen,
     refresh: bool = False,
     progress: DownloadProgressCallback | None = None,
+    bootstrap_path: Path | None = None,
 ) -> tuple[str, Path]:
-    tag, bundle_url, checksum_url = resolve_release(
-        repository, version, opener=opener, progress=progress
-    )
+    manifest = resolve_release(version, opener=opener, progress=progress)
+    tag = manifest.version
     cache_root = cache_root.expanduser().resolve()
     cache_root.mkdir(parents=True, exist_ok=True)
     target = _cache_target(cache_root, tag)
 
     with tempfile.TemporaryDirectory(prefix="xi-ai-codex-download-") as temp:
         temporary = Path(temp)
-        checksum_path = temporary / CHECKSUM_NAME
+        bootstrap_checksum_path = temporary / BOOTSTRAP_CHECKSUM_NAME
         _download(
-            checksum_url,
-            checksum_path,
+            _version_asset_url(tag, BOOTSTRAP_CHECKSUM_NAME),
+            bootstrap_checksum_path,
             opener=opener,
             limit=1024 * 1024,
             progress=progress,
-            stage="下载 Release 校验文件",
+            stage="下载 Bootstrap 校验文件",
         )
-        expected_hash = _parse_checksum(checksum_path)
+        bootstrap_checksum = _parse_checksum(
+            bootstrap_checksum_path, expected_name=BOOTSTRAP_NAME
+        )
+        if not hmac.compare_digest(bootstrap_checksum, manifest.bootstrap.sha256):
+            raise BootstrapError("Bootstrap 校验文件与发布清单不一致")
+        local_bootstrap = (
+            Path(__file__).resolve()
+            if bootstrap_path is None
+            else bootstrap_path.expanduser().resolve()
+        )
+        _verify_release_file(local_bootstrap, manifest.bootstrap, "本地 Bootstrap")
+
         if not refresh and target.is_dir() and _cached_bundle_is_valid(
-            target, expected_hash
+            target, manifest.bundle.sha256
         ):
             _emit_progress(
                 progress,
@@ -577,16 +723,31 @@ def install_release(
             )
             return tag, target
 
+        checksum_path = temporary / CHECKSUM_NAME
+        _download(
+            _version_asset_url(tag, CHECKSUM_NAME),
+            checksum_path,
+            opener=opener,
+            limit=1024 * 1024,
+            progress=progress,
+            stage="下载 Release 校验文件",
+        )
+        expected_hash = _parse_checksum(checksum_path)
+        if not hmac.compare_digest(expected_hash, manifest.bundle.sha256):
+            raise BootstrapError("程序包校验文件与发布清单不一致")
+
         bundle_path = temporary / BUNDLE_NAME
         _download(
-            bundle_url,
+            _version_asset_url(tag, BUNDLE_NAME),
             bundle_path,
             opener=opener,
             limit=MAX_DOWNLOAD_BYTES,
+            expected_size=manifest.bundle.size,
             progress=progress,
             stage="下载 Release 程序包",
         )
         _emit_progress(progress, DownloadProgress("校验 SHA-256", "start"))
+        _verify_release_file(bundle_path, manifest.bundle, "下载的 Release 程序包")
         _verify_checksum(bundle_path, expected_hash)
         _emit_progress(progress, DownloadProgress("校验 SHA-256", "complete"))
 
@@ -632,17 +793,12 @@ def run_setup(bundle_root: Path, setup_args: list[str], *, runner=subprocess.run
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="下载、校验并运行 Xi-AI Codex GitHub Release。"
-    )
-    parser.add_argument(
-        "--repo",
-        default=os.environ.get("GITHUB_REPOSITORY"),
-        help="公开 GitHub 仓库，格式为 OWNER/REPO",
+        description="从固定 HTTPS 源下载、校验并运行 Xi-AI Codex。"
     )
     parser.add_argument(
         "--version",
-        default=os.environ.get("XI_AI_CODEX_VERSION"),
-        help="指定 Release 标签；如需最新版，必须显式传入 latest",
+        default=os.environ.get("XI_AI_CODEX_VERSION", "latest"),
+        help="指定发布版本；默认通过 latest.json 解析最新版",
     )
     parser.add_argument("--cache-dir", type=Path, default=_default_cache_root())
     parser.add_argument("--refresh", action="store_true")
@@ -657,7 +813,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(
     argv: list[str] | None = None,
     *,
-    opener=urlopen,
+    opener=_strict_urlopen,
     runner=subprocess.run,
     progress: DownloadProgressCallback | None = None,
 ) -> int:
@@ -667,34 +823,27 @@ def main(
         setup_args = setup_args[1:]
     try:
         _require_supported_python()
-        if not args.repo:
-            raise BootstrapError("请传入 --repo OWNER/REPO 或设置 GITHUB_REPOSITORY")
-        if not args.version:
-            raise BootstrapError(
-                "请传入 --version TAG 或设置 XI_AI_CODEX_VERSION；"
-                "如需最新版，请显式使用 latest"
-            )
-        repository = _validate_repository(args.repo)
+        if any(arg == "--repo" or arg.startswith("--repo=") for arg in setup_args):
+            raise BootstrapError("--repo 已移除；发布源固定为 download.xi-ai.net")
         version = _validate_version(args.version)
         if not args.configure and "--detect-only" not in setup_args:
             setup_args.insert(0, "--detect-only")
         progress_callback = progress if progress is not None else BootstrapProgress()
         tag, bundle_root = install_release(
-            repository,
             version,
             args.cache_dir,
             opener=opener,
             refresh=args.refresh,
             progress=progress_callback,
         )
-        print(f"GitHub Release 校验通过：{repository}@{tag}")
+        print(f"HTTPS 发布源校验通过：{DOWNLOAD_BASE_URL}/{tag}")
         print(f"本地程序包：{bundle_root}")
         return run_setup(bundle_root, setup_args, runner=runner)
     except BootstrapError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 1
     except OSError as exc:
-        print(f"错误：本地 Release 操作失败（{exc.__class__.__name__}）", file=sys.stderr)
+        print(f"错误：本地发布操作失败（{exc.__class__.__name__}）", file=sys.stderr)
         return 1
     except KeyboardInterrupt:
         print("已取消。", file=sys.stderr)

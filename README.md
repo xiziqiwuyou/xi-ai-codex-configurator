@@ -43,10 +43,11 @@ sh scripts/setup.sh --detect-only
 This mode performs no Xi-AI request, does not ask for a token, and does not
 write configuration, catalog, session, database, or backup files.
 
-## GitHub Releases
+## Verified HTTPS Releases
 
-For a computer without this repository, publish a tagged GitHub Release. The
-release workflow creates these assets:
+Computers without a repository clone download releases from the fixed public
+source `https://download.xi-ai.net/xi-ai-codex`. Each immutable version
+directory contains these assets:
 
 ```text
 xi-ai-codex-bundle.zip
@@ -56,60 +57,67 @@ xi-ai-codex-bootstrap.py.sha256
 xi-ai-codex-release.json
 ```
 
-Download and verify the standalone bootstrap first. It downloads and verifies
-the complete bundle into a versioned local cache. Without `--configure`, it
-always runs `--detect-only`; entering a Key requires an explicit second step.
+The standalone bootstrap is checked against both the release manifest and its
+independent checksum before Python runs. It then applies the same two checks to
+the bundle before extracting it into a versioned local cache. Without
+`--configure`, it always runs `--detect-only`.
 
 ### One-line setup
 
 Windows PowerShell (paste once, then press Enter):
 
 ```powershell
-$r='xiziqiwuyou/xi-ai-codex-configurator';$d=Join-Path $env:TEMP 'xi-ai-codex-bootstrap';New-Item -ItemType Directory -Force $d|Out-Null;$h=@{'Accept'='application/vnd.github+json';'X-GitHub-Api-Version'='2022-11-28'};$m=Invoke-RestMethod -Headers $h -Uri "https://api.github.com/repos/$r/releases/latest";$p=Join-Path $d 'xi-ai-codex-bootstrap.py';$s="$p.sha256";function Get-XiAsset($n,$o){$x=$m.assets|Where-Object name -eq $n|Select-Object -First 1;if(-not $x){throw "Release 缺少资产：$n"};curl.exe --progress-bar --fail --location --retry 3 --retry-all-errors --header 'Accept: application/octet-stream' --header 'X-GitHub-Api-Version: 2022-11-28' $x.url --output $o;if($LASTEXITCODE -ne 0){throw "下载失败：$n"}};Get-XiAsset 'xi-ai-codex-bootstrap.py' $p;Get-XiAsset 'xi-ai-codex-bootstrap.py.sha256' $s;$e=((Get-Content $s -Raw).Trim() -split '\s+')[0].ToLowerInvariant();$a=(Get-FileHash $p -Algorithm SHA256).Hash.ToLowerInvariant();if($e -ne $a){throw 'Bootstrap SHA-256 校验失败'};if(Get-Command py -ErrorAction SilentlyContinue){py -3 $p --repo $r --version $m.tag_name --configure}else{python $p --repo $r --version $m.tag_name --configure}
+& {$ErrorActionPreference='Stop';Set-StrictMode -Version 3;$b='https://download.xi-ai.net/xi-ai-codex';$d=Join-Path $env:TEMP ('xi-ai-codex-bootstrap-'+[guid]::NewGuid().ToString('N'));New-Item -ItemType Directory $d|Out-Null;if(Get-Command py -ErrorAction SilentlyContinue){$x='py';$xa=@('-3')}elseif(Get-Command python -ErrorAction SilentlyContinue){$x='python';$xa=@()}else{throw '需要 Python 3.11 或更高版本'};function Get-XiFile($u,$o,$z){curl.exe --proto '=https' --tlsv1.2 --progress-bar --fail --max-redirs 0 --retry 3 --retry-all-errors --max-filesize $z --header 'Cache-Control: no-cache' $u --output $o;if($LASTEXITCODE -ne 0){throw "下载失败：$u"}};try{$l=Join-Path $d 'latest.json';Get-XiFile "$b/latest.json" $l 1048576;$c="import json,re,sys;h=lambda p:dict(p) if len(p)==len(dict(p)) else (_ for _ in ()).throw(ValueError('duplicate key'));j=json.load(open(sys.argv[1],encoding='utf-8'),object_pairs_hook=h,parse_constant=lambda _v:(_ for _ in ()).throw(ValueError('non-finite number')));ok=set(j)=={'schema_version','version'} and type(j['schema_version']) is int and j['schema_version']==1 and isinstance(j['version'],str) and j['version']!='latest' and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}',j['version']);ok or (_ for _ in ()).throw(SystemExit('invalid latest.json'));print(j['version'])";$v=& $x @xa -c $c $l;if($LASTEXITCODE -ne 0){throw 'latest.json 校验失败'};$f=Join-Path $d 'xi-ai-codex-release.json';Get-XiFile "$b/$v/xi-ai-codex-release.json" $f 1048576;$p=Join-Path $d 'xi-ai-codex-bootstrap.py';$s="$p.sha256";Get-XiFile "$b/$v/xi-ai-codex-bootstrap.py" $p 10485760;Get-XiFile "$b/$v/xi-ai-codex-bootstrap.py.sha256" $s 1048576;$c="import hashlib,json,re,sys;h=lambda p:dict(p) if len(p)==len(dict(p)) else (_ for _ in ()).throw(ValueError('duplicate key'));m=json.load(open(sys.argv[1],encoding='utf-8'),object_pairs_hook=h,parse_constant=lambda _v:(_ for _ in ()).throw(ValueError('non-finite number')));a=m.get('bootstrap');c=open(sys.argv[3],encoding='ascii').read().strip();q=re.fullmatch(r'([0-9A-Fa-f]{64})[ \t]+\*?xi-ai-codex-bootstrap\.py',c);data=open(sys.argv[2],'rb').read();ok=set(m)=={'schema_version','version','bundle','bootstrap'} and type(m.get('schema_version')) is int and m['schema_version']==1 and m.get('version')==sys.argv[4] and isinstance(a,dict) and set(a)=={'name','sha256','size'} and a['name']=='xi-ai-codex-bootstrap.py' and isinstance(a['sha256'],str) and re.fullmatch(r'[0-9a-f]{64}',a['sha256']) and type(a['size']) is int and 0<a['size']<=10485760 and a['size']==len(data) and q and q.group(1).lower()==a['sha256'] and hashlib.sha256(data).hexdigest()==a['sha256'];ok or (_ for _ in ()).throw(SystemExit('bootstrap verification failed'))";& $x @xa -c $c $f $p $s $v;if($LASTEXITCODE -ne 0){throw 'Bootstrap 校验失败'};& $x @xa $p --version $v --configure;if($LASTEXITCODE -ne 0){throw "Bootstrap 运行失败，退出码 $LASTEXITCODE"}}finally{Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue}}
 ```
 
 macOS/Linux (paste once, then press Enter):
 
 ```sh
-sh -c 'set -eu; r=xiziqiwuyou/xi-ai-codex-configurator; d="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"; mkdir -p "$d"; m="$d/release.json"; curl --progress-bar --fail --location --retry 3 -H "Accept: application/vnd.github+json" -H "X-GitHub-Api-Version: 2022-11-28" "https://api.github.com/repos/$r/releases/latest" -o "$m"; tag=$(python3 -c "import json,sys;print(json.load(open(sys.argv[1],encoding=\"utf-8\"))[\"tag_name\"])" "$m"); asset(){ python3 -c "import json,sys;m=json.load(open(sys.argv[1],encoding=\"utf-8\"));print(next(a[\"url\"] for a in m[\"assets\"] if a[\"name\"]==sys.argv[2]))" "$m" "$1"; }; p="$d/xi-ai-codex-bootstrap.py"; b=$(asset xi-ai-codex-bootstrap.py); c=$(asset xi-ai-codex-bootstrap.py.sha256); curl --progress-bar --fail --location --retry 3 -H "Accept: application/octet-stream" -H "X-GitHub-Api-Version: 2022-11-28" "$b" -o "$p"; curl --progress-bar --fail --location --retry 3 -H "Accept: application/octet-stream" -H "X-GitHub-Api-Version: 2022-11-28" "$c" -o "$p.sha256"; cd "$d"; if command -v sha256sum >/dev/null 2>&1; then sha256sum -c xi-ai-codex-bootstrap.py.sha256; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 -c xi-ai-codex-bootstrap.py.sha256; else echo "No SHA-256 tool found" >&2; exit 1; fi; python3 "$p" --repo "$r" --version "$tag" --configure'
+set -eu; b='https://download.xi-ai.net/xi-ai-codex'; d=$(mktemp -d "${TMPDIR:-/tmp}/xi-ai-codex-bootstrap.XXXXXX"); trap 'rm -rf "$d"' EXIT; trap 'exit 1' HUP INT TERM; get(){ curl --proto '=https' --tlsv1.2 --progress-bar --fail --max-redirs 0 --retry 3 --retry-all-errors --max-filesize "$3" -H 'Cache-Control: no-cache' "$1" -o "$2"; }; get "$b/latest.json" "$d/latest.json" 1048576; v=$(python3 -c 'import json,re,sys;h=lambda p:dict(p) if len(p)==len(dict(p)) else (_ for _ in ()).throw(ValueError("duplicate key"));j=json.load(open(sys.argv[1],encoding="utf-8"),object_pairs_hook=h,parse_constant=lambda _v:(_ for _ in ()).throw(ValueError("non-finite number")));ok=set(j)=={"schema_version","version"} and type(j["schema_version"]) is int and j["schema_version"]==1 and isinstance(j["version"],str) and j["version"]!="latest" and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}",j["version"]);ok or (_ for _ in ()).throw(SystemExit("invalid latest.json"));print(j["version"])' "$d/latest.json"); get "$b/$v/xi-ai-codex-release.json" "$d/xi-ai-codex-release.json" 1048576; p="$d/xi-ai-codex-bootstrap.py"; get "$b/$v/xi-ai-codex-bootstrap.py" "$p" 10485760; get "$b/$v/xi-ai-codex-bootstrap.py.sha256" "$p.sha256" 1048576; python3 -c 'import hashlib,json,re,sys;h=lambda p:dict(p) if len(p)==len(dict(p)) else (_ for _ in ()).throw(ValueError("duplicate key"));m=json.load(open(sys.argv[1],encoding="utf-8"),object_pairs_hook=h,parse_constant=lambda _v:(_ for _ in ()).throw(ValueError("non-finite number")));a=m.get("bootstrap");c=open(sys.argv[3],encoding="ascii").read().strip();q=re.fullmatch(r"([0-9A-Fa-f]{64})[ \t]+\*?xi-ai-codex-bootstrap\.py",c);data=open(sys.argv[2],"rb").read();ok=set(m)=={"schema_version","version","bundle","bootstrap"} and type(m.get("schema_version")) is int and m["schema_version"]==1 and m.get("version")==sys.argv[4] and isinstance(a,dict) and set(a)=={"name","sha256","size"} and a["name"]=="xi-ai-codex-bootstrap.py" and isinstance(a["sha256"],str) and re.fullmatch(r"[0-9a-f]{64}",a["sha256"]) and type(a["size"]) is int and 0<a["size"]<=10485760 and a["size"]==len(data) and q and q.group(1).lower()==a["sha256"] and hashlib.sha256(data).hexdigest()==a["sha256"];ok or (_ for _ in ()).throw(SystemExit("bootstrap verification failed"))' "$d/xi-ai-codex-release.json" "$p" "$p.sha256" "$v"; python3 "$p" --version "$v" --configure
 ```
 
-Both commands resolve the latest release through `api.github.com`, download
-the bootstrap and checksum through the binary release-asset API, save them
-locally, and verify SHA-256 before Python runs. The resolved tag is pinned for
-the remainder of the setup. They do not pipe downloaded script text directly
-into a shell.
+Both commands read `https://download.xi-ai.net/xi-ai-codex/latest.json`, pin its
+validated version, and verify the local bootstrap before running it. They do
+not use FTP credentials, follow cross-host redirects, or pipe downloaded code
+directly into a shell.
+
+The bootstrap defaults to `--version latest`. Use `--version <tag>` to pin a
+known release, add `--refresh` to rebuild that version's local cache, and omit
+`--configure` (or pass `--detect-only`) for a non-interactive safety check.
 
 ### Manual pinned-version setup
 
 Windows PowerShell:
 
 ```powershell
-$repo = "OWNER/REPO"
-$tag = "v0.4.1"
+$base = "https://download.xi-ai.net/xi-ai-codex"
+$v = "v0.5.0"
 $dir = Join-Path $env:TEMP "xi-ai-codex-bootstrap"
 New-Item -ItemType Directory -Force $dir | Out-Null
-Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -OutFile (Join-Path $dir "xi-ai-codex-bootstrap.py")
-Invoke-WebRequest "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py.sha256" -OutFile (Join-Path $dir "xi-ai-codex-bootstrap.py.sha256")
+curl.exe --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-release.json" --output (Join-Path $dir "xi-ai-codex-release.json")
+curl.exe --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-bootstrap.py" --output (Join-Path $dir "xi-ai-codex-bootstrap.py")
+curl.exe --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-bootstrap.py.sha256" --output (Join-Path $dir "xi-ai-codex-bootstrap.py.sha256")
+$manifest = Get-Content (Join-Path $dir "xi-ai-codex-release.json") -Raw | ConvertFrom-Json
 $expected = (Get-Content (Join-Path $dir "xi-ai-codex-bootstrap.py.sha256") -Raw).Trim().Split()[0].ToLowerInvariant()
 $actual = (Get-FileHash (Join-Path $dir "xi-ai-codex-bootstrap.py") -Algorithm SHA256).Hash.ToLowerInvariant()
-if ($expected -ne $actual) { throw "Bootstrap checksum verification failed" }
-py -3 (Join-Path $dir "xi-ai-codex-bootstrap.py") --repo $repo --version $tag --detect-only
-py -3 (Join-Path $dir "xi-ai-codex-bootstrap.py") --repo $repo --version $tag --configure
+if ($manifest.version -cne $v -or $manifest.bootstrap.name -cne "xi-ai-codex-bootstrap.py" -or $expected -cne $manifest.bootstrap.sha256 -or $actual -cne $manifest.bootstrap.sha256 -or (Get-Item (Join-Path $dir "xi-ai-codex-bootstrap.py")).Length -ne [long]$manifest.bootstrap.size) { throw "Bootstrap verification failed" }
+py -3 (Join-Path $dir "xi-ai-codex-bootstrap.py") --version $v --detect-only
+py -3 (Join-Path $dir "xi-ai-codex-bootstrap.py") --version $v --configure
 ```
 
 macOS/Linux:
 
 ```sh
-repo="OWNER/REPO"
-tag="v0.4.1"
+base="https://download.xi-ai.net/xi-ai-codex"
+v="v0.5.0"
 dir="${TMPDIR:-/tmp}/xi-ai-codex-bootstrap"
 mkdir -p "$dir"
-curl --fail --location "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py" -o "$dir/xi-ai-codex-bootstrap.py"
-curl --fail --location "https://github.com/$repo/releases/download/$tag/xi-ai-codex-bootstrap.py.sha256" -o "$dir/xi-ai-codex-bootstrap.py.sha256"
-(cd "$dir" && { command -v sha256sum >/dev/null 2>&1 && sha256sum -c xi-ai-codex-bootstrap.py.sha256 || shasum -a 256 -c xi-ai-codex-bootstrap.py.sha256; })
-python3 "$dir/xi-ai-codex-bootstrap.py" --repo "$repo" --version "$tag" --detect-only
-python3 "$dir/xi-ai-codex-bootstrap.py" --repo "$repo" --version "$tag" --configure
+curl --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-release.json" -o "$dir/xi-ai-codex-release.json"
+curl --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-bootstrap.py" -o "$dir/xi-ai-codex-bootstrap.py"
+curl --proto '=https' --tlsv1.2 --fail --max-redirs 0 "$base/$v/xi-ai-codex-bootstrap.py.sha256" -o "$dir/xi-ai-codex-bootstrap.py.sha256"
+python3 -c 'import hashlib,json,sys;m=json.load(open(sys.argv[1],encoding="utf-8"));data=open(sys.argv[2],"rb").read();expected=open(sys.argv[3],encoding="ascii").read().split()[0].lower();a=m["bootstrap"];assert m["version"]==sys.argv[4] and a["name"]=="xi-ai-codex-bootstrap.py" and expected==a["sha256"]==hashlib.sha256(data).hexdigest() and a["size"]==len(data)' "$dir/xi-ai-codex-release.json" "$dir/xi-ai-codex-bootstrap.py" "$dir/xi-ai-codex-bootstrap.py.sha256" "$v"
+python3 "$dir/xi-ai-codex-bootstrap.py" --version "$v" --detect-only
+python3 "$dir/xi-ai-codex-bootstrap.py" --version "$v" --configure
 ```
 
 The remote bundle never replaces the user's `config.toml`; it only supplies
@@ -119,13 +127,17 @@ conversation metadata are merged on the target computer.
 Pushing a version tag triggers the release workflow. For example:
 
 ```sh
-git tag v0.3.1
-git push origin v0.3.1
+git tag v0.5.0
+git push origin v0.5.0
 ```
 
-The workflow runs the full test suite, packages the five assets above, and
-creates the GitHub Release. Re-running the workflow replaces assets with the
-same fixed names.
+The workflow runs the full test suite, packages the five assets above, and uses
+explicit TLS in passive mode to upload them to
+`https://download.xi-ai.net/xi-ai-codex/<tag>/`. Version directories are
+immutable: re-running the same tag fails instead of replacing files. After all
+five exact HTTPS paths are readable and byte-identical, the workflow uploads a
+temporary pointer and atomically renames it to `latest.json`. GitHub stores the
+source and tag history; it is not the client download source.
 
 The setup flow is interactive:
 
@@ -189,10 +201,11 @@ include `/v1` exactly once.
 
 ### Progress feedback
 
-The release bootstrap reports Release metadata, checksum, bundle download,
-SHA-256 verification, extraction, and cache installation. A known response
-length shows a percentage; an unknown length shows downloaded bytes. The
-one-line `curl` commands use `--progress-bar` for the initial downloads.
+The release bootstrap reports latest-pointer and manifest downloads, checksum
+downloads, bundle download, SHA-256 verification, extraction, and cache
+installation. A known response length shows a percentage; an unknown length
+shows downloaded bytes. The one-line `curl` commands use `--progress-bar` for
+the initial downloads.
 
 When conversation migration is enabled, the configurator reports session
 scanning, file/database backup, rollout updates, SQLite metadata updates, and
@@ -275,6 +288,8 @@ Restart Codex after setup or restore.
 - Tokens are never printed or stored in manifests/tests.
 - The token is written only to the local Codex provider configuration.
 - Xi-AI endpoint errors are reported without response headers or token values.
+- Release clients connect only to the fixed HTTPS download host; FTPS exists
+  only inside the publishing workflow and no upload credential is shipped.
 - Invalid model responses, TOML, JSON, or unsupported session schemas fail
   before mutation or trigger automatic rollback.
 
