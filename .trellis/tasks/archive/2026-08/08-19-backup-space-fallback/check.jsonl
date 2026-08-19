@@ -1,0 +1,1 @@
+{"file":".trellis/spec/backend/codex-configurator.md","reason":"Verify low-space preflight, compact/v1 restore compatibility, stable snapshots, and no-write failure behavior against the executable backend contract."}
