@@ -91,3 +91,26 @@ Implemented cross-platform Codex discovery, safe detect-only mode, verified GitH
 ### Status
 
 [OK] **Completed**
+
+
+## Session 5: Xi-AI endpoint, progress, and context settings
+
+**Date**: 2026-08-19
+**Task**: Xi-AI endpoint, progress, and context settings
+**Branch**: `master`
+
+### Summary
+
+Switched Xi-AI to api.xi-ai.net, added download and local-session migration progress, introduced 500K/1M context presets for Sol/Terra/Luna, synchronized documentation/specs, and verified 87 tests plus local smoke checks.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `a1836b5` | (see git log) |
+| `0aa802e` | (see git log) |
+| `f50f7eb` | (see git log) |
+
+### Status
+
+[OK] **Completed**
