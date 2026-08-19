@@ -80,7 +80,9 @@ jobs:
           set ftp:ssl-protect-list true
           set ssl:verify-certificate yes
           set ssl:check-hostname yes
-          mkdir -p $remote_root
+          # The website root is provisioned by the FTP administrator. Verify
+          # it exists instead of treating an existing directory as a failure.
+          cd $remote_root
           bye
           LFTP
 

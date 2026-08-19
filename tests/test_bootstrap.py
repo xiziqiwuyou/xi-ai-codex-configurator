@@ -721,6 +721,8 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertIn("set ftp:ssl-protect-list true", workflow)
         self.assertIn("set ssl:check-hostname yes", workflow)
         self.assertIn("-H 'Cache-Control: no-cache'", workflow)
+        self.assertIn("cd $remote_root", workflow)
+        self.assertNotIn("mkdir -p $remote_root", workflow)
         self.assertIn("$staging_name/$asset", workflow)
         self.assertIn("verify/final-$asset", workflow)
         self.assertIn("mv $staging_version $remote_version", workflow)
