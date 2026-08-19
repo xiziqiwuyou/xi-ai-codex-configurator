@@ -1,0 +1,3 @@
+{"file":".trellis/spec/backend/codex-configurator.md","reason":"Review must enforce no-upload, exact endpoint, N-branch isolation, SQLite readiness, backup/rollback, secret redaction, and cross-platform verification contracts."}
+{"file":".trellis/tasks/08-19-endpoint-progress-context-settings/research/repository-impact.md","reason":"Review uses the mapped callers and tests to detect missed endpoint references or uninstrumented long-running phases."}
+{"file":".trellis/tasks/08-19-endpoint-progress-context-settings/research/context-and-endpoint-evidence.md","reason":"Review validates that context fields remain integers and that unverified pricing guidance is not presented as official OpenAI fact."}
