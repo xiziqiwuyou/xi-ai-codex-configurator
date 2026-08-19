@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 5
+- **Total Sessions**: 6
 - **Last Active**: 2026-08-19
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~116 | Active |
+| `journal-1.md` | ~139 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 6 | 2026-08-19 | 迁移 FTPS 发布与 HTTPS 更新源 | `07a67ce`, `c3b5de8`, `ac360e3` | `master` |
 | 5 | 2026-08-19 | Xi-AI endpoint, progress, and context settings | `a1836b5`, `0aa802e`, `f50f7eb` | `master` |
 | 4 | 2026-08-19 | 发布 v0.3.1 修复 SQLite WAL 误判 | `84d37f1` | `master` |
 | 3 | 2026-08-19 | 发布 Xi-AI Codex 配置器 v0.3.0 | `7d0a132` | `master` |

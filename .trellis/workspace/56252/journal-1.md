@@ -114,3 +114,26 @@ Switched Xi-AI to api.xi-ai.net, added download and local-session migration prog
 ### Status
 
 [OK] **Completed**
+
+
+## Session 6: 迁移 FTPS 发布与 HTTPS 更新源
+
+**Date**: 2026-08-19
+**Task**: 迁移 FTPS 发布与 HTTPS 更新源
+**Branch**: `master`
+
+### Summary
+
+客户端固定使用 download.xi-ai.net HTTPS；GitHub Actions 通过 Python FTP_TLS 原子发布 v0.5.1，并完成公开资产校验和远程 bootstrap 探测。
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `07a67ce` | (see git log) |
+| `c3b5de8` | (see git log) |
+| `ac360e3` | (see git log) |
+
+### Status
+
+[OK] **Completed**
