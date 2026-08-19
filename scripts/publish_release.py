@@ -23,6 +23,13 @@ ASSET_NAMES = (
     "xi-ai-codex-bootstrap.py.sha256",
     "xi-ai-codex-release.json",
 )
+ENTRY_ASSET_NAMES = (
+    "setup.ps1",
+    "setup.ps1.sha256",
+    "setup.sh",
+    "setup.sh.sha256",
+)
+RELEASE_FILE_NAMES = (*ASSET_NAMES, *ENTRY_ASSET_NAMES)
 TAG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 PUBLIC_HOST = "download.xi-ai.net"
 PUBLIC_ROOT = "https://download.xi-ai.net/xi-ai-codex"
@@ -67,9 +74,9 @@ def _release_assets(dist: Path) -> tuple[Path, ...]:
     if not root.is_dir():
         raise PublishError("release asset directory does not exist")
     files = tuple(sorted(path.name for path in root.iterdir() if path.is_file()))
-    if files != tuple(sorted(ASSET_NAMES)):
-        raise PublishError("release directory must contain exactly five fixed assets")
-    return tuple(root / name for name in ASSET_NAMES)
+    if files != tuple(sorted(RELEASE_FILE_NAMES)):
+        raise PublishError("release directory must contain exactly nine fixed assets")
+    return tuple(root / name for name in RELEASE_FILE_NAMES)
 
 
 def _sha256_bytes(data: bytes) -> str:
@@ -144,6 +151,32 @@ def _delete_file(ftp: ftplib.FTP_TLS, path: str) -> None:
         pass
 
 
+def _file_exists(ftp: ftplib.FTP_TLS, path: str) -> bool:
+    try:
+        ftp.size(path)
+    except ftplib.error_perm as exc:
+        if str(exc).startswith("550"):
+            return False
+        raise PublishError("unable to inspect fixed entry asset") from exc
+    return True
+
+
+def _rollback_entries(
+    ftp: ftplib.FTP_TLS,
+    installed: list[str],
+    backed_up: list[tuple[str, str]],
+) -> None:
+    try:
+        for name in reversed(installed):
+            ftp.delete(name)
+        for name, backup_name in reversed(backed_up):
+            ftp.rename(backup_name, name)
+    except ftplib.all_errors as exc:
+        raise PublishError("fixed entry rollback was incomplete") from exc
+    installed.clear()
+    backed_up.clear()
+
+
 def _remove_staging(
     ftp: ftplib.FTP_TLS,
     staging_name: str,
@@ -181,7 +214,20 @@ def publish_release(
     if not run_id.isdigit() or not run_attempt.isdigit():
         raise PublishError("GitHub run identifiers are invalid")
     assets = _release_assets(dist)
+    assets_by_name = {asset.name: asset for asset in assets}
+    version_assets = tuple(assets_by_name[name] for name in ASSET_NAMES)
+    entry_assets = tuple(
+        assets_by_name[name] for name in ENTRY_ASSET_NAMES if name in assets_by_name
+    )
     staging_name = f"_staging-{tag}-{run_id}-{run_attempt}"
+    entry_temps = {
+        asset.name: f"{asset.name}.tmp-{run_id}-{run_attempt}"
+        for asset in entry_assets
+    }
+    entry_backups = {
+        asset.name: f"{asset.name}.bak-{run_id}-{run_attempt}"
+        for asset in entry_assets
+    }
     latest_temp = f"latest.json.tmp-{run_id}-{run_attempt}"
     latest_bytes = (
         json.dumps({"schema_version": 1, "version": tag}, indent=2) + "\n"
@@ -190,6 +236,8 @@ def publish_release(
     ftp = ftp_factory(context=ssl.create_default_context(), timeout=30)
     connected = False
     renamed = False
+    installed_entries: list[str] = []
+    backed_up_entries: list[tuple[str, str]] = []
     try:
         ftp.connect(host, port)
         connected = True
@@ -201,12 +249,12 @@ def publish_release(
             raise PublishError(f"release version already exists and is immutable: {tag}")
 
         ftp.mkd(staging_name)
-        for asset in assets:
+        for asset in version_assets:
             output(f"Uploading {asset.name}")
             with asset.open("rb") as source:
                 ftp.storbinary(f"STOR {staging_name}/{asset.name}", source)
 
-        for asset in assets:
+        for asset in version_assets:
             expected = asset.read_bytes()
             _verify_public_asset(
                 f"{PUBLIC_ROOT}/{staging_name}/{asset.name}",
@@ -217,7 +265,7 @@ def publish_release(
         ftp.rename(staging_name, tag)
         renamed = True
 
-        for asset in assets:
+        for asset in version_assets:
             expected = asset.read_bytes()
             _verify_public_asset(
                 f"{PUBLIC_ROOT}/{tag}/{asset.name}",
@@ -225,6 +273,43 @@ def publish_release(
                 opener=opener,
                 sleeper=sleeper,
             )
+
+        for asset in entry_assets:
+            temporary_name = entry_temps[asset.name]
+            output(f"Uploading fixed entry {asset.name}")
+            with asset.open("rb") as source:
+                ftp.storbinary(f"STOR {temporary_name}", source)
+        for asset in entry_assets:
+            temporary_name = entry_temps[asset.name]
+            _verify_public_asset(
+                f"{PUBLIC_ROOT}/{temporary_name}",
+                asset.read_bytes(),
+                opener=opener,
+                sleeper=sleeper,
+            )
+        try:
+            for asset in entry_assets:
+                backup_name = entry_backups[asset.name]
+                if _file_exists(ftp, asset.name):
+                    ftp.rename(asset.name, backup_name)
+                    backed_up_entries.append((asset.name, backup_name))
+            for asset in entry_assets:
+                ftp.rename(entry_temps[asset.name], asset.name)
+                installed_entries.append(asset.name)
+            for asset in entry_assets:
+                _verify_public_asset(
+                    f"{PUBLIC_ROOT}/{asset.name}",
+                    asset.read_bytes(),
+                    opener=opener,
+                    sleeper=sleeper,
+                )
+        except Exception:
+            _rollback_entries(ftp, installed_entries, backed_up_entries)
+            raise
+        for _name, backup_name in backed_up_entries:
+            _delete_file(ftp, backup_name)
+        backed_up_entries.clear()
+        installed_entries.clear()
 
         ftp.storbinary(f"STOR {latest_temp}", io.BytesIO(latest_bytes))
         _verify_public_asset(
@@ -240,7 +325,7 @@ def publish_release(
             opener=opener,
             sleeper=sleeper,
         )
-        output(f"Published {tag} and updated latest.json")
+        output(f"Published {tag}, fixed setup entries, and latest.json")
     except PublishError:
         raise
     except ftplib.all_errors as exc:
@@ -248,7 +333,9 @@ def publish_release(
     finally:
         if connected:
             if not renamed:
-                _remove_staging(ftp, staging_name, assets)
+                _remove_staging(ftp, staging_name, version_assets)
+            for temporary_name in entry_temps.values():
+                _delete_file(ftp, f"{REMOTE_ROOT}/{temporary_name}")
             _delete_file(ftp, f"{REMOTE_ROOT}/{latest_temp}")
             try:
                 ftp.quit()

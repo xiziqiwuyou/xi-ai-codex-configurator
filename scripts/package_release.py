@@ -17,6 +17,18 @@ VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 ROOT_FILES = ("README.md", "pyproject.toml")
 ROOT_DIRECTORIES = ("src", "assets")
 SETUP_FILES = ("scripts/setup.ps1", "scripts/setup.sh")
+# These are published at /xi-ai-codex/ so a user can keep one stable command
+# while the versioned bootstrap and bundle continue to be immutable.
+ENTRY_FILES = {
+    "setup.ps1": "scripts/remote_setup.ps1",
+    "setup.sh": "scripts/remote_setup.sh",
+}
+ENTRY_NAMES = (
+    "setup.ps1",
+    "setup.ps1.sha256",
+    "setup.sh",
+    "setup.sh.sha256",
+)
 
 
 def _sha256(path: Path) -> str:
@@ -49,6 +61,19 @@ def _write_checksum(path: Path) -> Path:
     checksum = path.with_name(path.name + ".sha256")
     checksum.write_text(f"{_sha256(path)}  {path.name}\n", encoding="ascii")
     return checksum
+
+
+def _write_entry_assets(root: Path, output: Path) -> list[Path]:
+    generated: list[Path] = []
+    for name, relative in ENTRY_FILES.items():
+        source = root / relative
+        if not source.is_file():
+            raise FileNotFoundError(f"Missing fixed entry source: {relative}")
+        destination = output / name
+        shutil.copy2(source, destination)
+        generated.append(destination)
+        generated.append(_write_checksum(destination))
+    return generated
 
 
 def build_release(root: Path, output: Path, version: str) -> list[Path]:
@@ -88,12 +113,14 @@ def build_release(root: Path, output: Path, version: str) -> list[Path]:
         + "\n",
         encoding="utf-8",
     )
+    entry_assets = _write_entry_assets(root, output)
     return [
         bundle,
         bundle_checksum,
         bootstrap,
         bootstrap_checksum,
         manifest,
+        *entry_assets,
     ]
 
 

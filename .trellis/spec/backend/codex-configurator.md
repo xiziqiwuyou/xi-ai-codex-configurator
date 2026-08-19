@@ -212,6 +212,17 @@ The publisher requires the exact public host, validates the tag and five-file
 set, uses the default certificate/hostname checks plus protected passive data,
 and reads credentials only from GitHub Secrets-backed environment variables.
 
+Each release build also produces `setup.ps1`, `setup.ps1.sha256`, `setup.sh`,
+and `setup.sh.sha256`. The publisher places these four mutable entry assets at
+the fixed `/xi-ai-codex/` root through temporary names, verifies each public
+HTTPS response byte-for-byte, moves any existing entries to per-run backup
+names, installs every new entry, and verifies the final names. If any swap or
+verification fails, it deletes partial new entries and restores every prior
+entry without relying on rename-overwrite behavior. Only after a successful
+swap does it remove those backups and replace `latest.json`. A new publisher
+invocation requires all nine local assets; it must not advance `latest.json`
+without fixed entries.
+
 The standalone bootstrap trusts only `https://download.xi-ai.net/xi-ai-codex`.
 `latest` reads the exact `latest.json` pointer, then the matching version
 manifest; an explicit tag reads only that version manifest. It constructs asset
@@ -241,7 +252,10 @@ The release manifest schema is:
 }
 ```
 
-The bootstrap does not accept or infer a GitHub repository. A release tag may be
+The fixed entry scripts resolve and validate `latest.json`, the matching
+manifest, the Bootstrap size, the manifest SHA-256, and the independent
+checksum before invoking Python. They add `--configure` and forward remaining
+arguments. The bootstrap does not accept or infer a GitHub repository. A release tag may be
 supplied with `--version TAG` or `XI_AI_CODEX_VERSION`; the default is the
 validated `latest.json` pointer. README one-line commands hard-code the public
 HTTPS source, validate the pointer, manifest, bootstrap checksum and size, then
@@ -427,7 +441,8 @@ raw response bodies.
   rollout compatibility, corrupt/duplicate/tail-drift rejection, low-space
   thresholds, and external roots.
 - Documentation tests assert copy-ready one-line commands include checksum
-  verification, explicit `latest --configure`, and no remote pipe execution.
+  verification through the fixed entry, explicit `--configure`, stable setup
+  URLs, and no remote pipe execution.
 
 ## 7. Wrong vs Correct
 

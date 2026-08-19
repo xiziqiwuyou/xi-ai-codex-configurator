@@ -649,7 +649,7 @@ class BootstrapTests(unittest.TestCase):
 
 
 class PackageReleaseTests(unittest.TestCase):
-    def test_release_package_contains_runtime_and_five_fixed_assets(self):
+    def test_release_package_contains_runtime_and_fixed_entry_assets(self):
         root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp)
@@ -666,8 +666,40 @@ class PackageReleaseTests(unittest.TestCase):
                     "xi-ai-codex-bootstrap.py",
                     "xi-ai-codex-bootstrap.py.sha256",
                     "xi-ai-codex-release.json",
+                    "setup.ps1",
+                    "setup.ps1.sha256",
+                    "setup.sh",
+                    "setup.sh.sha256",
                 },
             )
+            self.assertEqual(
+                {path.name for path in output.iterdir() if path.is_file()},
+                {
+                    "xi-ai-codex-bundle.zip",
+                    "xi-ai-codex-bundle.zip.sha256",
+                    "xi-ai-codex-bootstrap.py",
+                    "xi-ai-codex-bootstrap.py.sha256",
+                    "xi-ai-codex-release.json",
+                    "setup.ps1",
+                    "setup.ps1.sha256",
+                    "setup.sh",
+                    "setup.sh.sha256",
+                },
+            )
+            self.assertEqual(
+                (output / "setup.ps1").read_bytes(),
+                (root / "scripts/remote_setup.ps1").read_bytes(),
+            )
+            self.assertEqual(
+                (output / "setup.sh").read_bytes(),
+                (root / "scripts/remote_setup.sh").read_bytes(),
+            )
+            for name in ("setup.ps1", "setup.sh"):
+                checksum = (output / f"{name}.sha256").read_text(
+                    encoding="ascii"
+                )
+                expected = hashlib.sha256((output / name).read_bytes()).hexdigest()
+                self.assertEqual(checksum, f"{expected}  {name}\n")
             self.assertIn("src/codex_configurator/__main__.py", members)
             self.assertIn("assets/bundled-models.json", members)
             self.assertNotIn("__pycache__", "\n".join(members))
@@ -687,10 +719,15 @@ class PackageReleaseTests(unittest.TestCase):
         readme = (root / "README.md").read_text(encoding="utf-8")
         source = "https://download.xi-ai.net/xi-ai-codex"
 
-        self.assertGreaterEqual(readme.count(source), 7)
+        self.assertGreaterEqual(readme.count(source), 6)
         self.assertIn("latest.json", readme)
         self.assertIn("xi-ai-codex-release.json", readme)
         self.assertIn("xi-ai-codex-bootstrap.py.sha256", readme)
+        self.assertIn("setup.ps1.sha256", readme)
+        self.assertIn("setup.sh.sha256", readme)
+        self.assertIn("Get-FileHash", readme)
+        self.assertIn("sha256sum -c", readme)
+        self.assertIn("shasum -a 256 -c", readme)
         self.assertIn("--version $v --configure", readme)
         self.assertIn('--version "$v" --configure', readme)
         self.assertIn("curl.exe", readme)
@@ -701,6 +738,24 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertNotIn("FTPS_PASSWORD", readme)
         self.assertNotIn("| iex", readme.lower())
         self.assertNotIn("curl | sh", readme.lower())
+
+    def test_fixed_entries_verify_before_forwarding_setup_arguments(self):
+        root = Path(__file__).resolve().parents[1]
+        powershell = (root / "scripts/remote_setup.ps1").read_text(encoding="utf-8")
+        shell = (root / "scripts/remote_setup.sh").read_text(encoding="utf-8")
+
+        for source in (powershell, shell):
+            self.assertIn("https://download.xi-ai.net/xi-ai-codex", source)
+            self.assertIn("latest.json", source)
+            self.assertIn("xi-ai-codex-release.json", source)
+            self.assertIn('f"{BOOTSTRAP_NAME}.sha256"', source)
+            self.assertIn("DOWNLOAD_ATTEMPTS = 3", source)
+            self.assertIn("RejectRedirects", source)
+            self.assertIn("--configure", source)
+            self.assertNotIn("| iex", source.lower())
+            self.assertNotIn("curl | sh", source.lower())
+        self.assertIn("--configure @args", powershell)
+        self.assertIn('--configure "$@"', shell)
 
     def test_release_workflow_stages_versions_and_replaces_latest_last(self):
         root = Path(__file__).resolve().parents[1]
@@ -794,6 +849,12 @@ class FakePublishFtp:
             raise ftplib.error_perm("550 missing")
         self.directories.remove(relative)
 
+    def size(self, path):
+        relative = self._relative(path)
+        if relative not in self.files:
+            raise ftplib.error_perm("550 missing")
+        return len(self.files[relative])
+
     def quit(self):
         self.operations.append(("quit",))
 
@@ -807,9 +868,21 @@ class FailingConnectFtp(FakePublishFtp):
         raise OSError("connection failed")
 
 
+class FailingEntrySwapFtp(FakePublishFtp):
+    def rename(self, source, target):
+        if source == "setup.sh.tmp-42-1" and target == "setup.sh":
+            raise ftplib.error_temp("450 injected entry swap failure")
+        super().rename(source, target)
+
+
 class PublishReleaseTests(unittest.TestCase):
-    def _assets(self, root: Path) -> None:
-        for index, name in enumerate(publish_release.ASSET_NAMES, start=1):
+    def _assets(self, root: Path, *, include_entries: bool = False) -> None:
+        names = (
+            publish_release.RELEASE_FILE_NAMES
+            if include_entries
+            else publish_release.ASSET_NAMES
+        )
+        for index, name in enumerate(names, start=1):
             (root / name).write_bytes((name + "\n").encode() * index)
 
     @staticmethod
@@ -832,7 +905,7 @@ class PublishReleaseTests(unittest.TestCase):
     def test_standard_library_ftps_publisher_is_latest_last(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            self._assets(root)
+            self._assets(root, include_entries=True)
             ftp = FakePublishFtp(context=None, timeout=0)
             requests: list[str] = []
             output: list[str] = []
@@ -865,9 +938,9 @@ class PublishReleaseTests(unittest.TestCase):
         store_indexes = [
             index for index, operation in enumerate(operations) if operation[0] == "store"
         ]
-        self.assertEqual(len(store_indexes), 6)
+        self.assertEqual(len(store_indexes), 10)
         self.assertTrue(all(index < directory_rename for index in store_indexes[:5]))
-        self.assertTrue(store_indexes[-1] > directory_rename)
+        self.assertTrue(all(index > directory_rename for index in store_indexes[5:]))
         self.assertTrue(store_indexes[-1] < latest_rename)
         self.assertLess(directory_rename, latest_rename)
         self.assertEqual(set(failures.values()), {0})
@@ -877,6 +950,8 @@ class PublishReleaseTests(unittest.TestCase):
         )
         for name in publish_release.ASSET_NAMES:
             self.assertIn(f"v1.0.0/{name}", ftp.files)
+        for name in publish_release.ENTRY_ASSET_NAMES:
+            self.assertIn(name, ftp.files)
         self.assertTrue(any("_staging-v1.0.0-42-1" in url for url in requests))
         self.assertTrue(any("/v1.0.0/" in url for url in requests))
         self.assertEqual(ftp.operations[0], ("connect", publish_release.PUBLIC_HOST, 233))
@@ -884,10 +959,80 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertIn(("pasv", True), ftp.operations)
         self.assertNotIn("secret-value", "\n".join(output))
 
+    def test_fixed_entries_are_verified_and_replaced_before_latest(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._assets(root, include_entries=True)
+            ftp = FakePublishFtp(context=None, timeout=0)
+            requests: list[str] = []
+
+            publish_release.publish_release(
+                root,
+                "v1.0.0",
+                host=publish_release.PUBLIC_HOST,
+                port=233,
+                username="publisher",
+                password="secret-value",
+                run_id="42",
+                run_attempt="1",
+                ftp_factory=lambda **kwargs: ftp,
+                opener=self._opener(ftp, requests),
+                sleeper=lambda _seconds: None,
+            )
+
+        latest_rename = ftp.operations.index(
+            ("rename", "latest.json.tmp-42-1", "latest.json")
+        )
+        for name in publish_release.ENTRY_ASSET_NAMES:
+            temporary = f"{name}.tmp-42-1"
+            rename_index = ftp.operations.index(("rename", temporary, name))
+            self.assertLess(rename_index, latest_rename)
+            self.assertIn(name, ftp.files)
+            self.assertTrue(any(url.endswith(f"/{temporary}") for url in requests))
+            self.assertTrue(any(url.endswith(f"/{name}") for url in requests))
+        self.assertEqual(
+            ftp.operations[-2],
+            ("rename", "latest.json.tmp-42-1", "latest.json"),
+        )
+
+    def test_fixed_entry_swap_restores_prior_files_on_mid_swap_failure(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            self._assets(root, include_entries=True)
+            ftp = FailingEntrySwapFtp(context=None, timeout=0)
+            old_entries = {
+                name: f"old-{name}".encode()
+                for name in publish_release.ENTRY_ASSET_NAMES
+            }
+            ftp.files.update(old_entries)
+            old_latest = b'{"schema_version":1,"version":"v0.9.0"}\n'
+            ftp.files["latest.json"] = old_latest
+
+            with self.assertRaises(publish_release.PublishError):
+                publish_release.publish_release(
+                    root,
+                    "v1.0.0",
+                    host=publish_release.PUBLIC_HOST,
+                    port=233,
+                    username="publisher",
+                    password="secret-value",
+                    run_id="42",
+                    run_attempt="1",
+                    ftp_factory=lambda **kwargs: ftp,
+                    opener=self._opener(ftp, []),
+                    sleeper=lambda _seconds: None,
+                )
+
+        for name, content in old_entries.items():
+            self.assertEqual(ftp.files[name], content)
+        self.assertEqual(ftp.files["latest.json"], old_latest)
+        self.assertFalse(any(".tmp-42-1" in name for name in ftp.files))
+        self.assertFalse(any(".bak-42-1" in name for name in ftp.files))
+
     def test_publisher_rejects_existing_version_before_upload(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            self._assets(root)
+            self._assets(root, include_entries=True)
             ftp = FakePublishFtp(context=None, timeout=0, existing={"v1.0.0"})
             with self.assertRaises(publish_release.PublishError):
                 publish_release.publish_release(
@@ -910,7 +1055,7 @@ class PublishReleaseTests(unittest.TestCase):
     def test_publisher_rejects_unsafe_inputs_and_incomplete_assets(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            self._assets(root)
+            self._assets(root, include_entries=True)
             (root / publish_release.ASSET_NAMES[0]).unlink()
             with self.assertRaises(publish_release.PublishError):
                 publish_release._release_assets(root)
@@ -932,7 +1077,7 @@ class PublishReleaseTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            self._assets(root)
+            self._assets(root, include_entries=True)
             ftp = FailingConnectFtp(context=None, timeout=0)
             with self.assertRaises(publish_release.PublishError):
                 publish_release.publish_release(
