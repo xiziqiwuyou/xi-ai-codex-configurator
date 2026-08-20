@@ -77,6 +77,20 @@ directly. The entry still validates `latest.json`, the version manifest, the
 Bootstrap size, the manifest SHA-256, and the independent Bootstrap checksum;
 the Bootstrap then verifies the release bundle before running configuration.
 
+After a successful configuration transaction, the configurator sends one
+detached launch request to the verified Codex desktop executable and prints the
+launch PID. If the desktop was already running, it is left alone; if discovery
+only found a CLI, the setup reports that Codex must be started manually. In a
+PowerShell window opened with `-File`, the transient setup window may close after
+that status is printed. The exact one-line form returns to the current
+interactive PowerShell instead of terminating it, so the final status and any
+error remain visible.
+
+For the Microsoft Store build, the observed executable may live under
+`WindowsApps` and reject direct execution. The launcher detects that case and
+uses the registered `OpenAI.Codex` AppX application ID through
+`explorer.exe shell:AppsFolder\\<AUMID>` before falling back to the verified path.
+
 Windows PowerShell strict checksum mode (verifies the fixed entry before
 execution):
 
@@ -174,6 +188,9 @@ The setup flow is interactive:
 8. The tool estimates backup space, shows scan/backup/migration progress,
    creates a compact rollback backup, and applies the validated configuration.
    Large batches are throttled so the terminal remains readable.
+9. After a successful real setup, the tool starts the detected Codex desktop
+   client in a detached process, or gives a manual-start instruction when no
+   desktop executable can be proven.
 
 ## Path Discovery
 

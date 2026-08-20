@@ -15,6 +15,7 @@ from .discovery import (
 )
 from .endpoints import PROVIDER_ID
 from .errors import BackupSpaceError, ConfiguratorError
+from .launcher import CodexLaunchResult, launch_codex, select_launch_target
 from .progress import ConsoleProgress
 from .remote_models import fetch_remote_model_ids
 from .sessions import collect_rollout_changes, sqlite_columns, sqlite_path
@@ -213,6 +214,44 @@ def _read_existing_config(path: Path) -> str:
         raise ConfiguratorError(f"无法读取 Codex 配置文件：{path}") from exc
 
 
+def _report_post_commit_launch(
+    discovery: DiscoveryResult,
+    *,
+    was_closed: bool,
+    launcher=None,
+    output=print,
+) -> None:
+    """Report or request the one permitted post-commit desktop launch."""
+
+    if not was_closed and discovery.desktop_process is not None:
+        output(
+            "Codex 桌面客户端仍在运行，已保留现有实例；请完全退出后重新启动以加载新配置。"
+        )
+        return
+
+    launch_target = select_launch_target(discovery, was_closed=was_closed)
+    if launch_target is None:
+        output("未检测到可自动启动的 Codex 桌面程序；配置已提交，请手动启动 Codex。")
+        return
+
+    try:
+        launch_callable = launch_codex if launcher is None else launcher
+        launch_result: CodexLaunchResult = launch_callable(
+            discovery,
+            was_closed=was_closed,
+        )
+    except ConfiguratorError:
+        raise
+    except Exception as exc:
+        raise ConfiguratorError(
+            "配置已提交，但 Codex 启动请求失败；请手动启动 Codex。"
+        ) from exc
+    output(
+        f"配置已提交，启动请求已发送（PID {launch_result.pid}）；"
+        f"目标：{launch_result.target}"
+    )
+
+
 def _setup(
     args,
     *,
@@ -222,6 +261,7 @@ def _setup(
     output=print,
     desktop_closer=None,
     process_detector=None,
+    codex_launcher=None,
 ) -> int:
     discovery_options = {}
     if process_detector is not None:
@@ -361,12 +401,12 @@ def _setup(
     validated = validate_installed(result.codex_home)
     output(f"Xi-AI 配置完成，默认模型：{validated['model']}")
     output(f"备份已创建：{backup_dir}")
-    if desktop_was_closed:
-        output("Codex 已由脚本关闭；请重新启动 Codex 以加载新配置。")
-    elif result.desktop_process is not None:
-        output("请完全退出并重新启动 Codex，以加载新的供应商配置。")
-    else:
-        output("请重新启动 Codex，以加载新的供应商配置。")
+    _report_post_commit_launch(
+        result,
+        was_closed=desktop_was_closed,
+        launcher=codex_launcher,
+        output=output,
+    )
     return 0
 
 
@@ -450,6 +490,7 @@ def main(
     output=print,
     desktop_closer=None,
     process_detector=None,
+    codex_launcher=None,
 ) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -463,6 +504,7 @@ def main(
                 output=output,
                 desktop_closer=desktop_closer,
                 process_detector=process_detector,
+                codex_launcher=codex_launcher,
             )
         if args.command == "status":
             return _status(args, output=output)

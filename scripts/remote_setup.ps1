@@ -1,3 +1,12 @@
+& {
+param(
+    [bool]$scriptIsFileInvocation,
+    [object[]]$forwardedArgs
+)
+
+# Keep preferences and working variables out of the caller's scope when the
+# fixed entry is evaluated by the one-line command. Never terminate the
+# caller's interactive PowerShell in the evaluated mode.
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version 3
 
@@ -28,8 +37,12 @@ foreach ($candidate in $candidates) {
     }
 }
 if (-not $selected) {
-    Write-Error "Python 3.11 or newer is required."
-    exit 1
+    Write-Warning "Python 3.11 or newer is required."
+    if ($scriptIsFileInvocation) {
+        exit 1
+    }
+    $global:LASTEXITCODE = 1
+    return
 }
 
 $downloader = @'
@@ -251,9 +264,22 @@ try {
     }
     $version = (Get-Content -LiteralPath (Join-Path $temporaryDirectory "version.txt") -Raw).Trim()
     $bootstrap = Join-Path $temporaryDirectory "xi-ai-codex-bootstrap.py"
-    & $python @pythonArguments $bootstrap --version $version --configure @args
+    & $python @pythonArguments $bootstrap --version $version --configure @forwardedArgs
     $exitCode = $LASTEXITCODE
+} catch {
+    Write-Warning ("Codex setup failed: " + $_.Exception.Message)
+    $exitCode = 1
 } finally {
     Remove-Item -LiteralPath $temporaryDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
-exit $exitCode
+if ($scriptIsFileInvocation) {
+    # Close only a transient `-File` host, after the configurator has printed
+    # its completion and Codex-launch status.
+    exit $exitCode
+}
+
+# The evaluated fixed entry runs inside the caller's PowerShell. Never terminate
+# that interactive host; return instead and leave the global exit code available.
+$global:LASTEXITCODE = $exitCode
+return
+} (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) @args

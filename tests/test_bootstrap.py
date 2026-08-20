@@ -740,6 +740,10 @@ class PackageReleaseTests(unittest.TestCase):
         self.assertIn("the version manifest", short_section)
         self.assertIn("the independent Bootstrap checksum", short_section)
         self.assertIn("verifies the release bundle", short_section)
+        short_section_flat = " ".join(short_section.split())
+        self.assertIn("detached launch request", short_section_flat)
+        self.assertIn("returns to the current interactive PowerShell", short_section_flat)
+        self.assertIn("OpenAI.Codex", short_section_flat)
 
         strict_section = readme[
             readme.index(strict_heading) : readme.index(posix_heading)
@@ -785,6 +789,7 @@ class PackageReleaseTests(unittest.TestCase):
     def test_fixed_entries_verify_before_forwarding_setup_arguments(self):
         root = Path(__file__).resolve().parents[1]
         powershell = (root / "scripts/remote_setup.ps1").read_text(encoding="utf-8")
+        local_powershell = (root / "scripts/setup.ps1").read_text(encoding="utf-8")
         shell = (root / "scripts/remote_setup.sh").read_text(encoding="utf-8")
 
         for source in (powershell, shell):
@@ -797,10 +802,18 @@ class PackageReleaseTests(unittest.TestCase):
             self.assertIn("--configure", source)
             self.assertNotIn("| iex", source.lower())
             self.assertNotIn("curl | sh", source.lower())
-        self.assertIn("--configure @args", powershell)
+        self.assertIn("--configure @forwardedArgs", powershell)
         self.assertIn("verify-release.py", powershell)
         self.assertIn("WriteAllText", powershell)
         self.assertNotIn("-c $downloader", powershell)
+        self.assertIn("$scriptIsFileInvocation", powershell)
+        self.assertIn("$forwardedArgs", powershell)
+        self.assertIn("$global:LASTEXITCODE", powershell)
+        self.assertIn("Never terminate", powershell)
+        self.assertIn("interactive PowerShell", powershell)
+        self.assertIn("$scriptIsFileInvocation", local_powershell)
+        self.assertIn("$forwardedArgs", local_powershell)
+        self.assertIn("Get-Location", local_powershell)
         self.assertIn('--configure "$@"', shell)
 
     @unittest.skipUnless(os.name == "nt", "requires Windows PowerShell 5.1")
@@ -904,6 +917,45 @@ class PackageReleaseTests(unittest.TestCase):
                     timeout=30,
                     check=False,
                 )
+                script_literal = str(script).replace("'", "''")
+                iex_command = (
+                    "& { "
+                    "$ErrorActionPreference = 'Continue'; "
+                    "Set-StrictMode -Off; "
+                    "$env:XI_AI_SCOPE_SENTINEL = 'caller-value'; "
+                    "Remove-Variable selected -ErrorAction SilentlyContinue; "
+                    f"$source = Get-Content -Raw -LiteralPath '{script_literal}'; "
+                    "$source = $source.Replace('@args', '--detect-only'); "
+                    "iex $source; "
+                    "if ($ErrorActionPreference -ne 'Continue') { "
+                    "throw 'ErrorActionPreference leaked from fixed entry' }; "
+                    "if (Test-Path variable:selected) { "
+                    "throw 'working variables leaked from fixed entry' }; "
+                    "try { $null = $XI_AI_UNDEFINED_SCOPE_PROBE } catch { "
+                    "throw 'StrictMode leaked from fixed entry' }; "
+                    "if ($env:XI_AI_SCOPE_SENTINEL -ne 'caller-value') { "
+                    "throw 'environment state leaked from fixed entry' }; "
+                    "Write-Output 'XI_AI_IEX_SURVIVED' "
+                    "}"
+                )
+                iex_result = subprocess.run(
+                    [
+                        str(powershell),
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-Command",
+                        iex_command,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    env=environment,
+                    timeout=30,
+                    check=False,
+                )
             finally:
                 server.shutdown()
                 server.server_close()
@@ -918,6 +970,12 @@ class PackageReleaseTests(unittest.TestCase):
                 json.loads(marker.read_text(encoding="utf-8")),
                 ["--version", version, "--configure", "--detect-only"],
             )
+            self.assertEqual(
+                iex_result.returncode,
+                0,
+                msg=f"stdout:\n{iex_result.stdout}\nstderr:\n{iex_result.stderr}",
+            )
+            self.assertIn("XI_AI_IEX_SURVIVED", iex_result.stdout)
             self.assertEqual(list(process_temp.glob("xi-ai-codex-setup-*")), [])
 
     def test_release_workflow_stages_versions_and_replaces_latest_last(self):

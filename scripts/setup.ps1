@@ -1,6 +1,18 @@
+& {
+param(
+    [bool]$scriptIsFileInvocation,
+    [object[]]$forwardedArgs
+)
+
+# Keep preferences and working variables out of the caller's scope when this
+# script is evaluated instead of run with `-File`.
 $ErrorActionPreference = "Stop"
 
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+$projectRoot = if ($scriptIsFileInvocation) {
+    (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+} else {
+    (Get-Location).Path
+}
 $candidates = @()
 $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
 if ($pyLauncher) {
@@ -28,11 +40,16 @@ foreach ($candidate in $candidates) {
     }
 }
 if (-not $selected) {
-    Write-Error "Python 3.11 or newer is required."
-    exit 1
+    Write-Warning "Python 3.11 or newer is required."
+    if ($scriptIsFileInvocation) {
+        exit 1
+    }
+    $global:LASTEXITCODE = 1
+    return
 }
 
 $sourcePath = Join-Path $projectRoot "src"
+$priorPythonPath = $env:PYTHONPATH
 if ($env:PYTHONPATH) {
     $env:PYTHONPATH = "$sourcePath;$env:PYTHONPATH"
 } else {
@@ -40,5 +57,27 @@ if ($env:PYTHONPATH) {
 }
 $command = $selected.Command
 $prefix = @($selected.Prefix)
-& $command @prefix -m codex_configurator setup @args
-exit $LASTEXITCODE
+try {
+    & $command @prefix -m codex_configurator setup @forwardedArgs
+    $exitCode = $LASTEXITCODE
+} catch {
+    Write-Warning ("Codex setup failed: " + $_.Exception.Message)
+    $exitCode = 1
+} finally {
+    if ($null -eq $priorPythonPath) {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONPATH = $priorPythonPath
+    }
+}
+if ($scriptIsFileInvocation) {
+    # A transient `powershell -File` window may close after the success/error
+    # status has already been printed by the configurator.
+    exit $exitCode
+}
+
+# The fixed one-line command runs in the user's existing host. Returning here
+# keeps that host alive while still exposing the child status to callers.
+$global:LASTEXITCODE = $exitCode
+return
+} (-not [string]::IsNullOrWhiteSpace($PSScriptRoot)) @args

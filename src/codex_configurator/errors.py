@@ -34,6 +34,12 @@ class TransactionError(ConfiguratorError):
     pass
 
 
+class LaunchError(ConfiguratorError):
+    """A committed setup could not request a detached desktop launch."""
+
+    pass
+
+
 class BackupSpaceError(TransactionError):
     """The selected backup volume cannot safely hold the transaction backup."""
 

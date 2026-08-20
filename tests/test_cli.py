@@ -10,6 +10,7 @@ from codex_configurator.cli import _choose_context_config, main
 from codex_configurator.desktop_control import DesktopCloseResult
 from codex_configurator.discovery import DesktopProcess, DiscoveryResult
 from codex_configurator.errors import BackupSpaceError, DesktopControlError
+from codex_configurator.launcher import CodexLaunchResult
 from codex_configurator.toml_merge import (
     CLEAR_CONTEXT,
     CONTEXT_500K,
@@ -340,6 +341,9 @@ class CliTests(unittest.TestCase):
                     desktop_closer=lambda process: closed.append(process)
                     or DesktopCloseResult(root_pid=70, forced=False),
                     process_detector=lambda **kwargs: ((), ()),
+                    codex_launcher=lambda found, *, was_closed: CodexLaunchResult(
+                        desktop.root_executable, 9001
+                    ),
                 )
 
             self.assertEqual(result, 0)
@@ -354,6 +358,125 @@ class CliTests(unittest.TestCase):
             self.assertIn("[备份会话数据库] 完成", rendered)
             self.assertIn("[更新会话数据库] 完成", rendered)
             self.assertNotIn("placeholder-key", rendered)
+
+    def test_successful_migration_launches_verified_desktop_root_once(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            database = home / "state_5.sqlite"
+            connection = sqlite3.connect(database)
+            connection.execute(
+                "CREATE TABLE threads (id TEXT PRIMARY KEY, model_provider TEXT)"
+            )
+            connection.commit()
+            connection.close()
+            answers = iter(["", "1", "y"])
+            output = []
+            calls = []
+            desktop = DesktopProcess(
+                pid=77,
+                executable=Path("C:/Apps/Codex/resources/codex.exe"),
+                command_line="codex.exe app-server",
+                source="test-process",
+                root_pid=70,
+                root_executable=Path("C:/Apps/Codex/Codex.exe"),
+            )
+            discovery = DiscoveryResult(
+                home,
+                Path("C:/Tools/codex.exe"),
+                "0.144.1",
+                executable_source="path",
+                desktop_process=desktop,
+            )
+
+            def launcher(found, *, was_closed):
+                calls.append((found, was_closed))
+                return CodexLaunchResult(desktop.root_executable, 9001)
+
+            with patch(
+                "codex_configurator.cli.discover", return_value=discovery
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ):
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    opener=lambda request, timeout: FakeResponse(),
+                    output=output.append,
+                    desktop_closer=lambda process: DesktopCloseResult(70, False),
+                    process_detector=lambda **kwargs: ((), ()),
+                    codex_launcher=launcher,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, [(discovery, True)])
+            self.assertIn("PID 9001", "\n".join(output))
+
+    def test_cli_only_setup_reports_manual_start_without_launching(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "n"])
+            output = []
+            calls = []
+            discovery = DiscoveryResult(
+                home,
+                Path("/usr/bin/codex"),
+                "0.144.1",
+                executable_source="path",
+            )
+
+            with patch(
+                "codex_configurator.cli.discover", return_value=discovery
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ):
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    opener=lambda request, timeout: FakeResponse(),
+                    output=output.append,
+                    codex_launcher=lambda *args, **kwargs: calls.append(args),
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(calls, [])
+            self.assertIn("手动启动 Codex", "\n".join(output))
+
+    def test_post_commit_launch_failure_returns_nonzero_without_rollback(self):
+        with tempfile.TemporaryDirectory() as temp:
+            home = Path(temp)
+            answers = iter(["", "1", "n"])
+            output = []
+            discovery = DiscoveryResult(
+                home,
+                Path(temp) / "Codex.exe",
+                "0.144.1",
+                executable_source="explicit",
+            )
+
+            with patch(
+                "codex_configurator.cli.discover", return_value=discovery
+            ), patch(
+                "codex_configurator.cli.load_bundled_catalog",
+                return_value=self._bundled_catalog(),
+            ):
+                result = main(
+                    ["setup", "--codex-home", str(home)],
+                    input_fn=lambda prompt: next(answers),
+                    secret_fn=lambda prompt: "placeholder-key",
+                    opener=lambda request, timeout: FakeResponse(),
+                    output=output.append,
+                    codex_launcher=lambda *args, **kwargs: (_ for _ in ()).throw(
+                        RuntimeError("launch unavailable")
+                    ),
+                )
+
+            self.assertEqual(result, 1)
+            self.assertTrue((home / "config.toml").exists())
+            self.assertIn("配置已提交，但 Codex 启动请求失败", "\n".join(output))
 
     def test_migration_without_initial_desktop_runs_two_fresh_checks(self):
         with tempfile.TemporaryDirectory() as temp:

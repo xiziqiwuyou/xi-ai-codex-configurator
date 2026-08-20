@@ -28,6 +28,7 @@ def main(
     output: Callable[[str], None] = print,
     desktop_closer: Callable | None = None,
     process_detector: Callable | None = None,
+    codex_launcher: Callable | None = None,
 ) -> int
 ```
 
@@ -44,7 +45,13 @@ def resolve_codex_home_details(...) -> tuple[Path, str, tuple[str, ...], str]
 def inspect_process_records(...) -> tuple[ProcessRecord, ...]
 def discover_running_codex_processes(...) -> tuple[tuple[DesktopProcess, ...], tuple[str, ...]]
 def close_codex_desktop(process: DesktopProcess, ...) -> DesktopCloseResult
+def select_launch_target(discovery: DiscoveryResult, *, was_closed: bool) -> Path | None
+def launch_codex(discovery: DiscoveryResult, *, was_closed: bool, ...) -> CodexLaunchResult
 ```
+
+`CodexLaunchResult` contains only the verified executable `target` and the
+detached child `pid`; it never contains credentials, command-line secrets, or
+conversation data.
 
 `DiscoveryResult.executable` is a runnable CLI candidate. A desktop
 `app-server` process is reported separately as `desktop_process`, including
@@ -271,6 +278,27 @@ and verify `setup.ps1.sha256` before executing the fixed entry. The macOS/Linux
 command remains checksum-first. Strict Windows and all POSIX modes must not
 pipe a network response into a shell, and documentation must never contain
 FTPS credentials or other credential values.
+
+After a successful real setup transaction, the CLI may request one detached
+launch of a verified Codex desktop executable. A desktop instance that was
+closed for migration uses its captured GUI-root executable; an already-running
+instance is not duplicated; a plain PATH/npm CLI is never launched as a
+desktop fallback. The launch inherits no standard handles and must not receive
+the API token or conversation data. A launch-start failure is reported after
+the committed transaction with a manual-start instruction and a non-zero
+status; it does not attempt an invalid post-commit rollback.
+
+For a Microsoft Store installation, the observed `WindowsApps` binary is not
+directly executable by the setup process. The launcher must resolve the
+registered `OpenAI.Codex` application ID and activate it through
+`explorer.exe shell:AppsFolder\\<AUMID>` before falling back to the verified path.
+
+The fixed PowerShell entries inspect `$PSScriptRoot`: `-File` execution may
+close its transient host after the final status, while `Invoke-Expression`
+execution returns to the caller and sets `$global:LASTEXITCODE` instead of
+terminating an interactive PowerShell. Evaluated entries isolate their strict
+mode, error preference, and working variables from the caller's scope. Errors
+remain visible in both modes.
 
 ### Model response and catalog
 
