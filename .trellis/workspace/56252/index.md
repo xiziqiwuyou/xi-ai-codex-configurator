@@ -8,7 +8,7 @@
 
 <!-- @@@auto:current-status -->
 - **Active File**: `journal-1.md`
-- **Total Sessions**: 10
+- **Total Sessions**: 11
 - **Last Active**: 2026-08-20
 <!-- @@@/auto:current-status -->
 
@@ -19,7 +19,7 @@
 <!-- @@@auto:active-documents -->
 | File | Lines | Status |
 |------|-------|--------|
-| `journal-1.md` | ~223 | Active |
+| `journal-1.md` | ~244 | Active |
 <!-- @@@/auto:active-documents -->
 
 ---
@@ -29,6 +29,7 @@
 <!-- @@@auto:session-history -->
 | # | Date | Title | Commits | Branch |
 |---|------|-------|---------|--------|
+| 11 | 2026-08-20 | Post-setup Codex relaunch and PowerShell lifecycle | `098f543` | `master` |
 | 10 | 2026-08-20 | Publish fixed-entry short command | `8c4dde0` | `master` |
 | 9 | 2026-08-19 | Windows fixed entry hotfix | `429f497` | `master` |
 | 8 | 2026-08-19 | Verified fixed setup entrypoints | `341ee64` | `master` |

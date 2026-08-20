@@ -221,3 +221,24 @@ Made irm https://download.xi-ai.net/xi-ai-codex/setup.ps1|iex the default Window
 ### Status
 
 [OK] **Completed**
+
+
+## Session 11: Post-setup Codex relaunch and PowerShell lifecycle
+
+**Date**: 2026-08-20
+**Task**: Post-setup Codex relaunch and PowerShell lifecycle
+**Branch**: `master`
+
+### Summary
+
+Added evidence-based detached Codex desktop relaunch after successful setup, Windows Store AppX activation, post-commit launch error handling, and isolated PowerShell fixed-entry lifecycle for -File versus Invoke-Expression. Added regression tests, README/spec updates, and verified 140 tests plus Python, PowerShell, POSIX shell, and diff checks.
+
+### Git Commits
+
+| Hash | Message |
+|------|---------|
+| `098f543` | (see git log) |
+
+### Status
+
+[OK] **Completed**
